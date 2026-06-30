@@ -11,13 +11,13 @@ from pydantic_settings import BaseSettings
 from pydantic import Field
 
 
-class JarvisSettings(BaseSettings):
+class IALenaSettings(BaseSettings):
     """Configuración para el sistema S2S + Hermes."""
 
     # ── Paths ──────────────────────────────────────────────
     base_dir: Path = Field(default_factory=lambda: Path(__file__).parent)
     data_dir: Path = Field(default_factory=lambda: Path(__file__).parent / "data")
-    db_path:  Path = Field(default_factory=lambda: Path(__file__).parent / "data" / "jarvis.db")
+    db_path:  Path = Field(default_factory=lambda: Path(__file__).parent / "data" / "ialena.db")
     log_dir:  Path = Field(default_factory=lambda: Path(__file__).parent / "data" / "logs")
 
     # ── API Keys ───────────────────────────────────────────
@@ -36,7 +36,7 @@ class JarvisSettings(BaseSettings):
     monthly_budget: float = 50.0
 
     # ── Personalidad ──────────────────────────────────────
-    assistant_name: str = "Jarvis"
+    assistant_name: str = "IALena"
     user_name:      str = "Señor"
     language:       str = "es"
 
@@ -52,5 +52,5 @@ class JarvisSettings(BaseSettings):
 
 
 # Instancia global
-settings = JarvisSettings()
+settings = IALenaSettings()
 settings.ensure_directories()

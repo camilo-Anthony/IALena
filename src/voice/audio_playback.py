@@ -1,5 +1,5 @@
 """
-Módulo de reproducción de audio para Jarvis S2S.
+Módulo de reproducción de audio para IALena S2S.
 Reproduce audio PCM recibido del servidor de voz en los altavoces
 de forma continua usando PyAudio con cola thread-safe.
 """

@@ -1,5 +1,5 @@
 """
-Módulo de captura de micrófono para Jarvis S2S.
+Módulo de captura de micrófono para IALena S2S.
 Captura audio PCM en tiempo real usando PyAudio y lo deposita
 en una cola asyncio para consumo no-bloqueante.
 """

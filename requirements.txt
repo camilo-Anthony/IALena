@@ -1,4 +1,4 @@
-# === Jarvis S2S — Dependencias ===
+# === IALena S2S — Dependencias ===
 
 # Google Gemini Live (voz S2S)
 google-genai

@@ -37,7 +37,7 @@ if not exist ".venv" (
 echo.
 
 :: Activate and install dependencies
-echo [3/4] Instalando dependencias de JARVIS...
+echo [3/4] Instalando dependencias de IALena...
 call .venv\Scripts\activate.bat
 echo       [+] Actualizando pip...
 python -m pip install --upgrade pip >nul 2>&1
@@ -64,6 +64,6 @@ echo.
 echo Pasos finales:
 echo  1. Abre el archivo .env con cualquier block de notas.
 echo  2. Pega tus API Keys de Google AI Studio.
-echo  3. Haz doble clic en start.bat para iniciar a JARVIS.
+echo  3. Haz doble clic en start.bat para iniciar a IALena.
 echo.
 pause

@@ -2,12 +2,12 @@
 
 J.A.R.V.I.S. es un asistente de voz en tiempo real impulsado por la API **Gemini Live Multimodal** de Google (carril rápido para baja latencia) y **Hermes Agent** (carril lento para ejecutar tareas complejas, automatizar el navegador, leer archivos y usar la terminal).
 
-Al separar la conversación fluida (Gemini Live) de la ejecución de tareas pesadas (Hermes), JARVIS puede escucharte y responderte al instante, y al mismo tiempo investigar o ejecutar tareas complejas en segundo plano.
+Al separar la conversación fluida (Gemini Live) de la ejecución de tareas pesadas (Hermes), IALena puede escucharte y responderte al instante, y al mismo tiempo investigar o ejecutar tareas complejas en segundo plano.
 
 ## 🚀 Características
-* **Comunicación Speech-to-Speech (S2S):** Habla con JARVIS de forma natural. Sin botones de grabar, te escucha en tiempo real.
+* **Comunicación Speech-to-Speech (S2S):** Habla con IALena de forma natural. Sin botones de grabar, te escucha en tiempo real.
 * **Hermes Agent Integrado:** Cuando le pides algo complejo (ej. "Abre YouTube y pon música", "Busca las últimas noticias", "Resume este PDF"), delega la tarea a su agente interno.
-* **Transparencia Anti-Silencios:** Mientras Hermes trabaja, JARVIS te avisará inmediatamente ("Entendido, estoy procesando...") para que no haya silencios incómodos.
+* **Transparencia Anti-Silencios:** Mientras Hermes trabaja, IALena te avisará inmediatamente ("Entendido, estoy procesando...") para que no haya silencios incómodos.
 * **Rotador Automático de APIs:** Para evadir el error HTTP 429 (Límite de solicitudes de la capa gratuita), el sistema cuenta con un proxy local inteligente que rota automáticamente entre múltiples API Keys de distintos proyectos, haciéndolo 100% transparente.
 
 ## 📋 Requisitos
@@ -19,8 +19,8 @@ Al separar la conversación fluida (Gemini Live) de la ejecución de tareas pesa
 
 ### 1. Clonar el repositorio
 ```bash
-git clone https://github.com/tu-usuario/JARVIS.git
-cd JARVIS
+git clone https://github.com/tu-usuario/IALena.git
+cd IALena
 ```
 
 ### 2. Ejecutar el Setup Automático (Windows)
@@ -38,7 +38,7 @@ En Windows, simplemente haz doble clic en `setup.bat`. Este script se encargará
 Abre el archivo `.env` que se generó en la carpeta del proyecto y configura tus credenciales:
 
 ```env
-# Jarvis Voz (Gemini Live - Carril Rápido)
+# IALena Voz (Gemini Live - Carril Rápido)
 GEMINI_API_KEY=tu_api_key_gemini_aqui
 
 # Hermes Agent (Carril Lento)
@@ -48,7 +48,7 @@ HERMES_API_KEY_1=tu_api_key_proyecto_1
 HERMES_API_KEY_2=tu_api_key_proyecto_2
 ```
 
-## 🎙️ Cómo usar a JARVIS
+## 🎙️ Cómo usar a IALena
 
 Para iniciar el asistente, simplemente haz doble clic en:
 `start.bat`

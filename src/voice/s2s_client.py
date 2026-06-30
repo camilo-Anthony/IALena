@@ -1,5 +1,5 @@
 """
-Cliente S2S (Speech-to-Speech) para Jarvis usando Google Gemini Live API.
+Cliente S2S (Speech-to-Speech) para IALena usando Google Gemini Live API.
 
 Arquitectura de doble velocidad:
   - Carril Rápido: Audio bidireccional vía Gemini Multimodal Live (baja latencia).
@@ -80,7 +80,7 @@ class S2SClient:
         self._proxy_base_url = f"http://127.0.0.1:{proxy_port}/v1/"
 
         # ── Carril Lento: UN solo agente Hermes apuntando al proxy ─────────
-        print(f"[Jarvis] Inicializando Hermes Core ({len(HERMES_API_KEYS)} clave(s) en rotación)…")
+        print(f"[IALena] Inicializando Hermes Core ({len(HERMES_API_KEYS)} clave(s) en rotación)…")
         self.hermes = None
         if AIAgent:
             try:
@@ -91,7 +91,7 @@ class S2SClient:
                     quiet_mode=True,
                     save_trajectories=True,
                 )
-                print("[Jarvis] Hermes Core listo (rotación activa).")
+                print("[IALena] Hermes Core listo (rotación activa).")
             except Exception as exc:
                 self.hermes = None
                 print(f"[ERROR] Hermes no pudo inicializarse: {exc}")
@@ -123,7 +123,7 @@ class S2SClient:
                             for name in skill_names:
                                 context += f"  * {name}\n"
             except Exception as exc:
-                print(f"[Jarvis] Error cargando contexto de Hermes: {exc}")
+                print(f"[IALena] Error cargando contexto de Hermes: {exc}")
         return context
 
     # ── Conexión principal ───────────────────────────────────────────────
@@ -134,7 +134,7 @@ class S2SClient:
 
         hermes_context = self._load_hermes_context()
         # Variables base de identidad
-        bot_name = os.getenv("ASSISTANT_NAME", "Jarvis")
+        bot_name = os.getenv("ASSISTANT_NAME", "IALena")
         user_name = os.getenv("USER_NAME", "Señor")
 
         system_instruction_text = (
@@ -182,7 +182,7 @@ class S2SClient:
             output_audio_transcription=types.AudioTranscriptionConfig(),
         )
 
-        print(f"[Jarvis] Conectando a Gemini Live ({MODEL_LIVE})…")
+        print(f"[IALena] Conectando a Gemini Live ({MODEL_LIVE})…")
         try:
             self.is_running = True
             self.capture.start()
@@ -190,14 +190,14 @@ class S2SClient:
 
             async with self.client.aio.live.connect(model=MODEL_LIVE, config=config) as session:
                 self.session = session
-                print("[Jarvis] ¡Conexión establecida! Escuchando…")
+                print("[IALena] ¡Conexión establecida! Escuchando…")
                 await asyncio.gather(
                     self._send_audio(),
                     self._receive(),
                     self._inject_context(),
                 )
         except Exception as exc:
-            print(f"[Jarvis] Error de conexión: {exc}")
+            print(f"[IALena] Error de conexión: {exc}")
         finally:
             self.is_running = False
             self.capture.terminate()
@@ -212,7 +212,7 @@ class S2SClient:
                     audio=types.Blob(data=chunk, mime_type=f"audio/pcm;rate={INPUT_RATE}")
                 )
             except Exception as exc:
-                print(f"[Jarvis] Error enviando audio: {exc}")
+                print(f"[IALena] Error enviando audio: {exc}")
                 break
 
     # ── Recepción de audio / tool calls (Gemini → altavoz) ───────────────
@@ -240,7 +240,7 @@ class S2SClient:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                print(f"[Jarvis] Error recibiendo: {exc}")
+                print(f"[IALena] Error recibiendo: {exc}")
                 break
 
     # ── Puente asíncrono con Hermes (Carril Lento) ───────────────────────
@@ -355,9 +355,9 @@ class S2SClient:
                 if os.path.isdir(skills_dir):
                     files = os.listdir(skills_dir)
                     if files:
-                        print(f"[Jarvis] Habilidades detectadas: {len(files)}")
+                        print(f"[IALena] Habilidades detectadas: {len(files)}")
             except Exception as exc:
-                print(f"[Jarvis] Error inyectando contexto: {exc}")
+                print(f"[IALena] Error inyectando contexto: {exc}")
 
 
 

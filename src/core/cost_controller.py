@@ -1,5 +1,5 @@
 """
-Cost Controller for Jarvis
+Cost Controller for IALena
 Tracks token usage, per-request cost, enforces daily/monthly budgets,
 and can auto-downgrade models when budget is tight.
 """
