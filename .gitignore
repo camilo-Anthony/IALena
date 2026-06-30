@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+backend/venv/
+venv/
+.venv/
+
+# Environment variables
+backend/.env
+.env
+
+# Data (runtime generated)
+backend/data/
+*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Logs
+*.log
+
+# Whisper models (downloaded on first run)
+*.bin
+*.pt
+
+# ChromaDB
+chroma/
+
+# Instaladores
+*.exe
+
+# Documentación interna
+*.md
+!README.md

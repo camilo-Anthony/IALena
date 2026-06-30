@@ -1,0 +1,23 @@
+# === Jarvis S2S — Dependencias ===
+
+# Google Gemini Live (voz S2S)
+google-genai
+
+# Hermes Agent (cerebro)
+python-dotenv
+
+# Audio
+pyaudio
+
+# Cost tracking / DB
+aiosqlite
+
+# Config
+pydantic
+pydantic-settings
+
+# Logging
+loguru
+
+# Hermes-Agent package itself
+-e ./Hermes-Agent
