@@ -41,22 +41,22 @@ except ImportError:
     get_hermes_home = None
 
 # ── Configuración ────────────────────────────────────────────────────────
-load_dotenv()
+load_dotenv(encoding="utf-8")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY", "")
 
 # Carga todas las claves de Hermes definidas como HERMES_API_KEY_1, _2, _3...
 # Fallback a GEMINI_API_KEY si no hay ninguna.
 _raw_hermes_keys = [
     os.getenv(f"HERMES_API_KEY_{i}")
-    for i in range(1, 10)
+    for i in range(1, 30)
 ]
 HERMES_API_KEYS: list[str] = [k for k in _raw_hermes_keys if k] or [GEMINI_API_KEY]
 
 INPUT_RATE  = 16_000   # Gemini Live espera entrada a 16 kHz
 OUTPUT_RATE = 24_000   # Gemini Live devuelve audio a 24 kHz
-MODEL_LIVE  = "gemini-2.5-flash-native-audio-latest"
-MODEL_BRAIN = "gemini-2.5-flash"       # Más capaz → menos llamadas internas por tarea
-VOICE_NAME  = "Aoede"
+MODEL_LIVE  = os.getenv("MODEL_LIVE", "gemini-2.0-flash-exp")
+MODEL_BRAIN = os.getenv("MODEL_BRAIN", "gemini-2.5-flash")
+VOICE_NAME  = os.getenv("VOICE_NAME", "Aoede")
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -92,6 +92,18 @@ class S2SClient:
                     save_trajectories=True,
                 )
                 print("[IALena] Hermes Core listo (rotación activa).")
+                
+                # --- WARM-UP ---
+                # Hacemos una llamada fantasma en segundo plano para calentar las conexiones HTTP
+                # y que el primer llamado real del usuario no sufra latencia de cold-start.
+                import threading
+                def _warmup_hermes():
+                    try:
+                        self.hermes.chat("ping - responde ok")
+                    except:
+                        pass
+                threading.Thread(target=_warmup_hermes, daemon=True).start()
+                
             except Exception as exc:
                 self.hermes = None
                 print(f"[ERROR] Hermes no pudo inicializarse: {exc}")
@@ -138,14 +150,28 @@ class S2SClient:
         user_name = os.getenv("USER_NAME", "Señor")
 
         system_instruction_text = (
-            f"Eres {bot_name}, un asistente virtual de voz hiper-inteligente. "
-            f"Estás hablando con tu usuario, a quien debes referirte como '{user_name}'. "
-            "Habla siempre en español, de forma concisa y natural. "
-            "Para tareas complejas (archivos, código, búsquedas web, ejecutar comandos en terminal "
-            "o consultar recuerdos que no sepas) usa la herramienta 'ejecutar_hermes_core'. "
-            "REGLA DE IDENTIDAD CRÍTICA: Tú eres UNA SOLA ENTIDAD. NUNCA menciones la palabra 'Hermes', "
-            "ni digas que estás consultando a otro agente, ni hables de herramientas. "
-            "Di siempre 'Déjame buscarlo', 'Lo estoy haciendo', 'Revisaré mi base de datos', etc.\n"
+            f"Eres {bot_name}, un asistente de voz inteligente. "
+            f"Estás hablando con {user_name}. Habla siempre en español, de forma concisa y natural.\n\n"
+
+            "## CUÁNDO RESPONDER TÚ DIRECTAMENTE (sin llamar herramientas):\n"
+            "- Saludos y despedidas (hola, adiós, buenas tardes)\n"
+            "- Preguntas conversacionales simples (¿cómo estás?, ¿cuál es tu nombre?)\n"
+            "- Matemáticas básicas o preguntas de conocimiento general muy simple\n"
+            "- Confirmaciones cortas (ok, entendido, con mucho gusto)\n\n"
+
+            "## CUÁNDO USAR 'ejecutar_hermes_core' (delegar al cerebro principal):\n"
+            "- Búsquedas en internet o noticias actuales\n"
+            "- Leer, crear, editar o gestionar archivos\n"
+            "- Escribir o ejecutar código\n"
+            "- Recordar conversaciones pasadas o preferencias del usuario\n"
+            "- Tareas complejas de varios pasos\n"
+            "- Cualquier cosa que requiera acceso al sistema o información actualizada\n\n"
+
+            "## CUÁNDO USAR 'reproducir_musica_youtube':\n"
+            "- Cuando el usuario pida reproducir música, canciones o videos.\n\n"
+
+            "REGLA DE IDENTIDAD CRÍTICA: Tú eres UNA SOLA ENTIDAD. NUNCA menciones 'Hermes' ni herramientas. "
+            "Di siempre 'Déjame revisarlo', 'Lo estoy procesando', 'Dame un momento', etc.\n"
         )
         if hermes_context:
             system_instruction_text += (
@@ -171,6 +197,17 @@ class S2SClient:
                         },
                         required=["prompt"],
                     ),
+                ),
+                types.FunctionDeclaration(
+                    name="reproducir_musica_youtube",
+                    description="Abre YouTube y reproduce instantáneamente una canción o video específico.",
+                    parameters=types.Schema(
+                        type="OBJECT",
+                        properties={
+                            "cancion": types.Schema(type="STRING", description="Nombre de la canción o video a reproducir.")
+                        },
+                        required=["cancion"],
+                    ),
                 )
             ])],
             response_modalities=["AUDIO"],
@@ -180,6 +217,7 @@ class S2SClient:
                 )
             ),
             output_audio_transcription=types.AudioTranscriptionConfig(),
+            input_audio_transcription=types.AudioTranscriptionConfig(),
         )
 
         print(f"[IALena] Conectando a Gemini Live ({MODEL_LIVE})…")
@@ -237,6 +275,26 @@ class S2SClient:
                                 asyncio.create_task(
                                     self._run_hermes(fn.id, fn.name, fn.args.get("prompt", ""))
                                 )
+                            elif fn.name == "reproducir_musica_youtube":
+                                cancion = fn.args.get("cancion", "")
+                                print(f"[IALena] Reproduciendo en YouTube: {cancion}")
+                                # 1. Cerrar el ciclo de la tool call de inmediato
+                                try:
+                                    await self.session.send_tool_response(
+                                        function_responses=[
+                                            types.FunctionResponse(
+                                                name="reproducir_musica_youtube",
+                                                id=fn.id,
+                                                response={"result": f"Reproduciendo '{cancion}' en YouTube."}
+                                            )
+                                        ]
+                                    )
+                                except Exception as e:
+                                    print(f"[IALena] Error tool response música: {e}")
+                                # 2. Lanzar el script de YouTube en background
+                                import subprocess
+                                play_yt_path = os.path.join(os.path.dirname(__file__), "play_yt.py")
+                                subprocess.Popen([sys.executable, play_yt_path, cancion])
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -246,18 +304,33 @@ class S2SClient:
     # ── Puente asíncrono con Hermes (Carril Lento) ───────────────────────
     async def _run_hermes(self, call_id: str, name: str, prompt: str):
         print(f"[Hermes] Procesando: {prompt[:80]}…")
+        import time
+        start_time = time.time()
+        
+        # Efecto de sonido J.A.R.V.I.S. (sin interrumpir la voz)
+        def _computing_sound():
+            try:
+                import winsound
+                import os
+                wav_path = os.path.join(os.path.dirname(__file__), "assets", "jarvis_processing.wav")
+                if os.path.exists(wav_path):
+                    winsound.PlaySound(wav_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            except: pass
+        
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _computing_sound)
+        
         try:
             # ── FASE 1: ACK inmediato ──────────────────────────────────────────
-            # Responder la tool call de inmediato para que Gemini empiece a hablar.
-            # Gemini recibirá esto y generará audio de confirmación sin esperar.
             _ACKS = [
-                "Entendido, dame un momento para revisarlo.",
-                "Claro, estoy en ello. Procesando tu solicitud ahora mismo.",
-                "Perfecto, lo estoy tramitando. Regreso en un segundo.",
-                "De acuerdo, estoy trabajando en eso. Un momento.",
-                "Enseguida, déjame buscar esa información para ti.",
-                "Procesando...",
+                "Dile al usuario: 'Entendido, dame un momento para revisarlo.' y espera pacientemente.",
+                "Dile al usuario: 'Claro, estoy en ello. Un segundo...' y espera pacientemente.",
+                "Dile al usuario: 'Perfecto, lo estoy buscando. Regreso en un segundo.' y espera pacientemente.",
+                "Dile al usuario: 'De acuerdo, trabajando en eso. Un momento.' y espera pacientemente.",
+                "Dile al usuario: 'Enseguida, déjame consultar eso para ti.' y espera pacientemente."
             ]
+            import random
+
             if self.session:
                 try:
                     await self.session.send_tool_response(
@@ -265,77 +338,74 @@ class S2SClient:
                             types.FunctionResponse(
                                 id=call_id,
                                 name=name,
-                                response={"status": "procesando", "mensaje": random.choice(_ACKS)},
+                                response={"status": "procesando", "mensaje": random.choice(_ACKS)}
                             )
                         ]
                     )
                 except Exception as exc:
                     print(f"[Hermes] Error enviando ACK: {exc}")
-    
+
             # ── FASE 2: Ejecutar Hermes en segundo plano ───────────────────────
             import re
-            loop = asyncio.get_running_loop()
             result = "Error: Hermes Core no está disponible."
-    
-            # Prefijo de contexto del sistema operativo para que Hermes
-            # use el navegador predeterminado del sistema (con audio real)
-            # en vez de su browser automatizado interno (headless/muted).
-            _WINDOWS_HINT = (
-            "[CONTEXTO DEL SISTEMA - Windows 11]\n"
-            "IMPORTANTE: Estás operando en Windows 11. Para abrir URLs o reproducir "
-            "media (YouTube, Spotify, videos), el usuario debe escucharlo, así que "
-            "usa SIEMPRE el comando de terminal: `start <URL>`.\n"
-            "REGLA CRÍTICA PARA MÚSICA/VIDEOS: NO abras páginas de resultados de búsqueda (ej. youtube.com/results). "
-            "El usuario quiere que se reproduzca automáticamente. "
-            "Primero usa tus herramientas (búsqueda web o browser) de forma silenciosa para encontrar "
-            "la URL directa del video (ej. https://www.youtube.com/watch?v=...). "
-            "SOLO CUANDO TENGAS LA URL DIRECTA DEL VIDEO, ejecuta `start <URL>`.\n\n"
-            f"TAREA: {prompt}"
-        )
-    
-            max_retries = 3
-            for attempt in range(1, max_retries + 1):
-                try:
-                    if self.hermes:
-                        result = await loop.run_in_executor(None, self.hermes.chat, _WINDOWS_HINT)
-                    break  # éxito — salir del bucle
-                except Exception as exc:
-                    err_str = str(exc)
-                    # El proxy ya rota las keys automáticamente en cada llamada.
-                    # Aquí solo manejamos fallos totales con backoff.
-                    match = re.search(r"retry in ([\d.]+)s", err_str, re.IGNORECASE)
-                    if match and attempt < max_retries:
-                        wait = float(match.group(1)) + 5.0
-                        print(f"[Hermes] Esperando {wait:.0f}s sugeridos por Google (intento {attempt}/{max_retries})…")
-                        await asyncio.sleep(wait)
-                    elif attempt < max_retries:
-                        wait = 10.0 * attempt
-                        print(f"[Hermes] Error (intento {attempt}/{max_retries}). Reintentando en {wait:.1f}s… [{exc}]")
-                        await asyncio.sleep(wait)
-                    else:
-                        result = f"Error en Hermes tras {max_retries} intentos: {exc}"
-    
+            bot_name = os.getenv("ASSISTANT_NAME", "IALena")
+            
+            if self.hermes:
+                user_name = os.getenv("USER_NAME", "Señor")
+                
+                # Prefijo de contexto para que Hermes herede la personalidad y reglas de la PC
+                prompt_enriquecido = (
+                    f"[IDENTIDAD CRÍTICA]\n"
+                    f"Eres el núcleo lógico e investigativo del asistente '{bot_name}'. "
+                    f"El usuario '{user_name}' te ha pedido algo mediante la interfaz de voz.\n\n"
+                    f"[CONTEXTO DEL SISTEMA - Windows 11]\n"
+                    "IMPORTANTE: Estás operando en Windows 11. Para abrir URLs, usar el navegador "
+                    "o reproducir multimedia, DEBES usar comandos de terminal compatibles con Windows (ej. `start <URL>`).\n"
+                    "Para reproducir música/videos: NO abras páginas de resultados de YouTube. "
+                    "Usa tus herramientas para buscar la URL directa del video y luego ejecuta `start <URL>`.\n\n"
+                    f"TAREA DEL USUARIO: {prompt}\n\n"
+                    "[INSTRUCCIÓN INTERNA]: Resuelve la tarea usando tus herramientas. "
+                    "Cuando termines, devuelve SOLO los datos o el resultado final de tu investigación/acción. "
+                    f"NUNCA redactes un saludo, no actúes como asistente ni pidas confirmación. {bot_name} se encargará de hablar con el usuario basándose en tus datos puros."
+                )
+
+                max_retries = 3
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        result = await loop.run_in_executor(None, self.hermes.chat, prompt_enriquecido)
+                        break
+                    except Exception as exc:
+                        if "429" in str(exc) and attempt < max_retries:
+                            await asyncio.sleep(2)
+                        else:
+                            result = f"Error en Hermes tras {max_retries} intentos: {exc}"
+
             print(f"[Hermes] Listo.")
     
-            # ── FASE 3: Inyectar resultado como nuevo turno ────────────────────
-            # Ahora que Hermes terminó, inyectamos el resultado como un mensaje
-            # de cliente para que Gemini lo lea en voz alta de forma natural.
+            # ── FASE 3: Inyectar resultado evitando cortes bruscos ─────────────
             if self.session:
                 try:
-                    # Truncar el resultado para no exceder el contexto (tokens) de Gemini Live
                     res_str = str(result)
                     if len(res_str) > 800:
                         res_str = res_str[:800] + "... [truncado por longitud]"
-    
+
+                    # ANTI-INTERRUPCIÓN: Si Hermes terminó muy rápido, Gemini todavía está hablando el ACK.
+                    # Esperamos hasta que se cumplan al menos 5 segundos desde que empezó para no cortarle la frase.
+                    elapsed = time.time() - start_time
+                    if elapsed < 5.0:
+                        await asyncio.sleep(5.0 - elapsed)
+
                     result_text = (
                         f"[Resultado de tu búsqueda interna]: {res_str}. "
-                        "Por favor preséntale este resultado al usuario de forma natural, como si tú mismo lo hubieras encontrado o hecho. NUNCA menciones la palabra 'Hermes'."
+                        "Por favor preséntale este resultado al usuario de forma natural, NUNCA menciones a 'Hermes'."
                     )
                     await self.session.send_client_content(
-                        turns=types.Content(
-                            role="user",
-                            parts=[types.Part(text=result_text)],
-                        ),
+                        turns=[
+                            types.Content(
+                                role="user",
+                                parts=[types.Part(text=result_text)],
+                            )
+                        ],
                         turn_complete=True,
                     )
                 except Exception as exc:

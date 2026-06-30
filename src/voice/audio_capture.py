@@ -27,6 +27,24 @@ class AudioCapture:
 
         def _callback(in_data, _frame_count, _time_info, _status):
             if self._recording:
+                # --- NOISE GATE (Filtro de ruido) ---
+                # Evita que el propio altavoz o el ruido de fondo interrumpan a la IA.
+                try:
+                    import audioop
+                    rms = audioop.rms(in_data, 2)
+                except ImportError:
+                    # Fallback si usa Python >= 3.13 donde audioop no existe
+                    import struct, math
+                    count = len(in_data) // 2
+                    shorts = struct.unpack(f"<{count}h", in_data)
+                    rms = math.sqrt(sum(s*s for s in shorts) / count) if count > 0 else 0
+
+                # Bajamos el umbral a 200 porque micrófonos de bajo volumen eran cortados.
+                THRESHOLD = 200  
+                if rms < THRESHOLD:
+                    # Si el sonido es muy bajo, lo silenciamos por completo
+                    in_data = b'\x00' * len(in_data)
+
                 try:
                     loop.call_soon_threadsafe(self._queue.put_nowait, in_data)
                 except Exception as e:
