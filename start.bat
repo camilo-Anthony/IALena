@@ -60,7 +60,7 @@ echo [+] Presiona Ctrl+C en la ventana en cualquier momento para apagar a IALena
 echo.
 
 :: Lanzar cliente de voz CLI
-python src\main.py
+python -m src.main
 
 echo.
 echo IALena ha sido apagado.
