@@ -9,15 +9,6 @@ python-dotenv
 # Audio
 pyaudio
 
-# Cost tracking / DB
-aiosqlite
-
-# Config
-pydantic
-pydantic-settings
-
-# Logging
-loguru
 
 # Hermes-Agent package itself
 -e ./Hermes-Agent

@@ -38,8 +38,10 @@ _REAL_PATHS = {
     "/chat/completions",       # sin prefijo /v1
 }
 
+import os
+
 # Modelo que reportamos en las respuestas de discovery
-_MODEL_ID = "gemini-2.5-flash"
+_MODEL_ID = os.getenv("MODEL_BRAIN", "gemini-3.1-flash-lite")
 
 
 def _mock_models():
@@ -66,11 +68,11 @@ class _RotatingProxy(BaseHTTPRequestHandler):
     """Reenvía peticiones reales a Google rotando la API key."""
 
     _keys: list[str] = []
-    _key_cycle: itertools.cycle = None
+    _key_cycle: itertools.cycle | None = None
     _call_counter: int = 0
     _lock = threading.Lock()
 
-    def log_message(self, fmt, *args):
+    def log_message(self, format, *args):
         # Silenciar logs normales; solo mostrar errores reales de Google
         pass
 

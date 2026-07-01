@@ -1,5 +1,18 @@
 {
+  "include": ["."],
+  "exclude": [
+    ".venv",
+    "**/__pycache__"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
   "extraPaths": [
-    "Hermes-Agent"
+    "Hermes-Agent",
+    "."
+  ],
+  "executionEnvironments": [
+    {
+      "root": "."
+    }
   ]
 }

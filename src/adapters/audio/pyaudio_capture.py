@@ -5,6 +5,8 @@ en una cola asyncio para consumo no-bloqueante.
 """
 import pyaudio
 import asyncio
+# pyrefly: ignore [missing-import]
+from src.core.interfaces.audio import IAudioCapture
 
 
 FORMAT   = pyaudio.paInt16
@@ -12,7 +14,7 @@ CHANNELS = 1
 CHUNK    = 1024
 
 
-class AudioCapture:
+class PyAudioCapture(IAudioCapture):
     def __init__(self, rate: int = 16000):
         self.rate = rate
         self._pa = pyaudio.PyAudio()

@@ -5,6 +5,8 @@ de forma continua usando PyAudio con cola thread-safe.
 """
 import pyaudio
 import queue
+# pyrefly: ignore [missing-import]
+from src.core.interfaces.audio import IAudioPlayback
 
 
 FORMAT   = pyaudio.paInt16
@@ -12,7 +14,7 @@ CHANNELS = 1
 CHUNK    = 1024
 
 
-class AudioPlayback:
+class PyAudioPlayback(IAudioPlayback):
     def __init__(self, rate: int = 24000):
         self.rate = rate
         self._pa = pyaudio.PyAudio()
@@ -20,6 +22,11 @@ class AudioPlayback:
         self._queue = queue.Queue()
         self._buffer = bytearray()
         self._playing = False
+
+    @property
+    def is_busy(self) -> bool:
+        """Devuelve True si todavía hay audio reproduciéndose o en la cola."""
+        return not self._queue.empty() or len(self._buffer) > 0
 
     def start(self):
         """Abre el stream de salida y comienza a reproducir."""
