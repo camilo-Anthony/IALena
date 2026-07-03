@@ -19,7 +19,7 @@ Al separar la conversación fluida (Gemini Live) de la ejecución de tareas pesa
 
 ### 1. Clonar el repositorio
 ```bash
-git clone https://github.com/tu-usuario/IALena.git
+git clone https://github.com/camilo-anthony/IALena.git
 cd IALena
 ```
 
