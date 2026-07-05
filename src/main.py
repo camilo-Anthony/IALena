@@ -1,5 +1,6 @@
 import asyncio
 import os
+import socket
 from dotenv import load_dotenv
 
 # pyrefly: ignore [missing-import]
@@ -22,7 +23,39 @@ try:
 except ImportError:
     get_hermes_home = None
 
+_INSTANCE_LOCK_SOCKET = None
+
+
+def _acquire_single_instance_lock() -> bool:
+    """Evita dos instancias simultaneas capturando microfono y altavoz."""
+    global _INSTANCE_LOCK_SOCKET
+    port_raw = os.getenv("JARVIS_INSTANCE_LOCK_PORT", "43187")
+    try:
+        port = int(port_raw)
+    except ValueError:
+        port = 43187
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        sock.bind(("127.0.0.1", port))
+        sock.listen(1)
+    except OSError:
+        sock.close()
+        print(
+            f"[JARVIS] Ya hay una instancia activa (lock 127.0.0.1:{port}). "
+            "No se iniciara otra voz."
+        )
+        return False
+
+    _INSTANCE_LOCK_SOCKET = sock
+    return True
+
 def main():
+    if not _acquire_single_instance_lock():
+        return
+
     load_dotenv(encoding="utf-8")
     
     # 1. Configuración Básica
@@ -30,7 +63,7 @@ def main():
     OUTPUT_RATE = 24_000
     MODEL_BRAIN = os.getenv("MODEL_BRAIN", "gemini-3.1-flash-lite")
     
-    bot_name = os.getenv("ASSISTANT_NAME", "IALena")
+    bot_name = os.getenv("ASSISTANT_NAME", "JARVIS")
     user_name = os.getenv("USER_NAME", "Señor")
     voice_name = os.getenv("VOICE_NAME", "Aoede")
     
@@ -59,7 +92,7 @@ def main():
     try:
         asyncio.run(kernel.boot())
     except KeyboardInterrupt:
-        print("\n[IALena] Señal de interrupción recibida.")
+        print("\n[JARVIS] Señal de interrupción recibida.")
         kernel.shutdown()
 
 if __name__ == "__main__":

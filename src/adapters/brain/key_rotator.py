@@ -29,6 +29,7 @@ from urllib.error import HTTPError
 
 PROXY_PORT   = 8765
 GOOGLE_BASE  = "https://generativelanguage.googleapis.com/v1beta/openai"
+_CLIENT_DISCONNECT_ERRORS = (ConnectionAbortedError, BrokenPipeError, ConnectionResetError)
 
 # Rutas que SÍ se reenvían a Google (llamadas LLM reales)
 _REAL_PATHS = {
@@ -82,6 +83,9 @@ class _RotatingProxy(BaseHTTPRequestHandler):
     def do_GET(self):
         self._handle("GET")
 
+    def _client_disconnected(self, method: str, path: str):
+        print(f"[KeyRotator] Cliente cerro conexion para {method} {path}; respuesta descartada.")
+
     def _handle(self, method: str):
         path = self.path.split("?")[0]
 
@@ -94,8 +98,8 @@ class _RotatingProxy(BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 self.wfile.write(body)
-            except (ConnectionAbortedError, BrokenPipeError):
-                pass
+            except _CLIENT_DISCONNECT_ERRORS:
+                self._client_disconnected(method, path)
             return
 
         # ── Ruta desconocida → OK genérico ───────────────────────────────
@@ -105,8 +109,8 @@ class _RotatingProxy(BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 self.wfile.write(b"{}")
-            except (ConnectionAbortedError, BrokenPipeError):
-                pass
+            except _CLIENT_DISCONNECT_ERRORS:
+                self._client_disconnected(method, path)
             return
 
         # ── Ruta LLM real: reenviar a Google rotando claves ───────────────
@@ -147,7 +151,11 @@ class _RotatingProxy(BaseHTTPRequestHandler):
                         if h.lower() not in ("transfer-encoding", "connection"):
                             self.send_header(h, v)
                     self.end_headers()
-                    self.wfile.write(body_out)
+                    try:
+                        self.wfile.write(body_out)
+                    except _CLIENT_DISCONNECT_ERRORS:
+                        self._client_disconnected(method, path)
+                        return
                     print(f"[KeyRotator] ✅ {method} {path} → Key-{(start_idx+i)%len(keys)+1} (...{api_key[-6:]})")
                     return  # éxito — salir
 
@@ -164,38 +172,42 @@ class _RotatingProxy(BaseHTTPRequestHandler):
                 self.end_headers()
                 try:
                     self.wfile.write(last_body_err)
-                except (ConnectionAbortedError, BrokenPipeError):
-                    pass
+                except _CLIENT_DISCONNECT_ERRORS:
+                    self._client_disconnected(method, path)
+                return
+
+            except _CLIENT_DISCONNECT_ERRORS:
+                self._client_disconnected(method, path)
                 return
 
             except Exception as e:
                 print(f"[KeyRotator] ❌ Error de red: {e}")
-                self.send_response(502)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
                 try:
+                    self.send_response(502)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
                     self.wfile.write(json.dumps({"error": str(e)}).encode())
-                except (ConnectionAbortedError, BrokenPipeError):
-                    pass
+                except _CLIENT_DISCONNECT_ERRORS:
+                    self._client_disconnected(method, path)
                 return
 
         # Todas las keys agotadas → devolver el último error al cliente
         print(f"[KeyRotator] ⚠️  Todas las keys agotadas para {path}")
-        self.send_response(last_code)
-        self.send_header("Content-Type", "application/json")
-        if last_body_err:
-            self.send_header("Content-Length", str(len(last_body_err)))
-        self.end_headers()
         try:
+            self.send_response(last_code)
+            self.send_header("Content-Type", "application/json")
+            if last_body_err:
+                self.send_header("Content-Length", str(len(last_body_err)))
+            self.end_headers()
             self.wfile.write(last_body_err or b"{}")
-        except (ConnectionAbortedError, BrokenPipeError):
-            pass
+        except _CLIENT_DISCONNECT_ERRORS:
+            self._client_disconnected(method, path)
 
 
 def start_proxy(keys: list[str], port: int = PROXY_PORT) -> int:
     """
     Inicia el proxy en un hilo daemon. Devuelve el puerto en uso.
-    Seguro de llamar múltiples veces (no relanza si ya está corriendo).
+    Prueba puertos sucesivos si el inicial está ocupado.
     """
     if not keys:
         raise ValueError("Se necesita al menos una API key en el pool")
@@ -204,11 +216,25 @@ def start_proxy(keys: list[str], port: int = PROXY_PORT) -> int:
     _RotatingProxy._key_cycle = itertools.cycle(keys)
     _RotatingProxy._call_counter = 0
 
-    server = HTTPServer(("127.0.0.1", port), _RotatingProxy)
+    current_port = port
+    max_attempts = 20
+    server = None
+
+    for attempt in range(max_attempts):
+        try:
+            server = HTTPServer(("127.0.0.1", current_port), _RotatingProxy)
+            break
+        except OSError as e:
+            print(f"[KeyRotator] Puerto {current_port} ocupado. Probando el siguiente...")
+            current_port += 1
+
+    if not server:
+        raise OSError(f"No se pudo iniciar el proxy de claves en ningún puerto del {port} al {port + max_attempts - 1}")
+
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
     key_shorts = [f"...{k[-6:]}" for k in keys]
-    print(f"[KeyRotator] Proxy iniciado en http://127.0.0.1:{port}")
+    print(f"[KeyRotator] Proxy iniciado en http://127.0.0.1:{current_port}")
     print(f"[KeyRotator] Pool de {len(keys)} clave(s): {key_shorts}")
-    return port
+    return current_port

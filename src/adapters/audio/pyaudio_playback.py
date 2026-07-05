@@ -1,5 +1,5 @@
 """
-Módulo de reproducción de audio para IALena S2S.
+Módulo de reproducción de audio para JARVIS S2S.
 Reproduce audio PCM recibido del servidor de voz en los altavoces
 de forma continua usando PyAudio con cola thread-safe.
 """
@@ -67,11 +67,11 @@ class PyAudioPlayback(IAudioPlayback):
         self._stream.start_stream()
         print(f"[Altavoz] Reproducción iniciada a {self.rate} Hz")
 
-    def enqueue(self, pcm_bytes: bytes):
+    def enqueue(self, data: bytes):
         """Agrega audio PCM a la cola de reproducción."""
         if not self._playing:
             return
-        self._queue.put(pcm_bytes)
+        self._queue.put(data)
 
     def flush(self):
         """Vacía la cola y el buffer (para interrupciones)."""

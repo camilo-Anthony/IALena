@@ -6,6 +6,10 @@ import webbrowser
 
 def play_on_youtube(query: str):
     try:
+        # Modificar query para buscar versiones con letra
+        if "letras" not in query.lower() and "lyrics" not in query.lower():
+            query += " lyrics"
+
         query_string = urllib.parse.urlencode({"search_query": query})
         url = "https://www.youtube.com/results?" + query_string
         req = urllib.request.Request(
@@ -20,9 +24,13 @@ def play_on_youtube(query: str):
             video_id = match.group(1)
             video_url = "https://www.youtube.com/watch?v=" + video_id
             print(f"Abriendo {video_url} ...")
+            # Cerrar pestañas anteriores antes de abrir la nueva
+            import subprocess
+            subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/FI', 'WINDOWTITLE eq YouTube*'], capture_output=True)
             webbrowser.open(video_url, new=0)
         else:
             print("No se encontraron videos específicos. Abriendo página de resultados.")
+            subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/FI', 'WINDOWTITLE eq YouTube*'], capture_output=True)
             webbrowser.open(url, new=0) # Fallback a la pagina de busqueda
     except Exception as e:
         print(f"Error al buscar en YouTube: {e}")

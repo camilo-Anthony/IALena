@@ -1,5 +1,5 @@
 @echo off
-title J.A.R.V.I.S. - Start
+title JARVIS - Start
 color 0B
 echo.
 echo        _      _      ____   __     __  ___   ____
@@ -40,7 +40,7 @@ if not exist ".env" (
 )
 
 :: Check if the user left the default API key template
-findstr "tu_api_key_gemini_aqui" .env >nul
+findstr "tu_api_key_principal_aqui" .env >nul
 if %errorlevel%==0 (
     echo [!] ADVERTENCIA: Aún no has configurado tus API Keys en el archivo .env.
     echo [!] Por favor abre el archivo .env, coloca tus keys reales de Google AI Studio,
@@ -56,12 +56,12 @@ if not exist "data\logs" mkdir data\logs
 
 echo [+] Modulos cargados y verificados.
 echo [+] Conectando a Gemini Live...
-echo [+] Presiona Ctrl+C en la ventana en cualquier momento para apagar a IALena.
+echo [+] Presiona Ctrl+C en la ventana en cualquier momento para apagar a JARVIS.
 echo.
 
 :: Lanzar cliente de voz CLI
 python -m src.main
 
 echo.
-echo IALena ha sido apagado.
+echo JARVIS ha sido apagado.
 pause
