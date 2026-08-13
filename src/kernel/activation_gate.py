@@ -54,7 +54,7 @@ class ActivationGate:
         self.state = state
         self.last_state_change_at = time.monotonic()
         suffix = f": {reason}" if reason else ""
-        print(f"[ActivationGate] {old_state.value} -> {state.value}{suffix}")
+        print(f"\033[35m[ActivationGate]\033[0m {old_state.value} -> {state.value}{suffix}")
 
     def start_live_session(self, reason: str = "live_session_started") -> int:
         self.session_epoch += 1
@@ -110,7 +110,7 @@ class ActivationGate:
         )
         self.pending_wake_requests.append(request)
         print(
-            f"[ActivationGate] Wake request: source={source}, reason={reason}, "
+            f"\033[35m[ActivationGate]\033[0m Wake request: source={source}, reason={reason}, "
             f"priority={priority}, turn={turn_id or 'none'}"
         )
         return request

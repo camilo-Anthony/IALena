@@ -27,8 +27,11 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse, parse_qs, urlunparse
+
+if TYPE_CHECKING:
+    from agent.rate_limit_tracker import RateLimitState
 
 from agent.context_compressor import ContextCompressor
 from agent.iteration_budget import IterationBudget
@@ -213,15 +216,15 @@ def init_agent(
     service_tier: str = None,
     request_overrides: Dict[str, Any] = None,
     prefill_messages: List[Dict[str, Any]] = None,
-    platform: str = None,
-    user_id: str = None,
-    user_id_alt: str = None,
-    user_name: str = None,
-    chat_id: str = None,
-    chat_name: str = None,
-    chat_type: str = None,
-    thread_id: str = None,
-    gateway_session_key: str = None,
+    platform: Optional[str] = None,
+    user_id: Optional[str] = None,
+    user_id_alt: Optional[str] = None,
+    user_name: Optional[str] = None,
+    chat_id: Optional[str] = None,
+    chat_name: Optional[str] = None,
+    chat_type: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    gateway_session_key: Optional[str] = None,
     skip_context_files: bool = False,
     load_soul_identity: bool = False,
     skip_memory: bool = False,

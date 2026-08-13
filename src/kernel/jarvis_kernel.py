@@ -28,10 +28,12 @@ class JarvisKernel:
         brain: IAgentBrain,
         voice_llm_factory,
         context_manager: ContextManager,
+        brain_fast: IAgentBrain | None = None,
     ):
         self.audio_capture = audio_capture
         self.audio_playback = audio_playback
         self.brain = brain
+        self.brain_fast = brain_fast
         self.context_manager = context_manager
 
         # Iniciar EventBus
@@ -66,8 +68,9 @@ class JarvisKernel:
             activation_gate=self.activation_gate,
             task_ledger=self.task_ledger,
             conversation_sessions=self.conversation_sessions,
+            brain_fast=self.brain_fast,
         )
-        
+
         # Factory method para instanciar el adaptador LLM inyectando las dependencias base
         self.voice_assistant = voice_llm_factory(
             self.audio_capture,
@@ -78,15 +81,15 @@ class JarvisKernel:
             self.conversation_sessions,
             self.cognitive_policy,
         )
-        
+
     async def boot(self):
         """Inicia todos los subsistemas y entra en el bucle principal."""
         print("[JARVIS Kernel] Inicializando subsistemas...")
-        
+
         try:
             # Asociar el loop actual a Synapse para callbacks asíncronos seguros
             self.synapse.attach_loop(asyncio.get_running_loop())
-            
+
             # Arrancar la Voz (el carril rápido y principal por ahora)
             if self.voice_assistant:
                 await self.voice_assistant.connect()
@@ -98,7 +101,7 @@ class JarvisKernel:
             print(f"[JARVIS Kernel] Kernel Panic: {e}")
         finally:
             self.shutdown()
-            
+
     def shutdown(self):
         """Apaga ordenadamente los subsistemas."""
         print("\n[JARVIS Kernel] Apagando de forma segura...")

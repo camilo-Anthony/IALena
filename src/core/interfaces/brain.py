@@ -30,7 +30,7 @@ class IAgentBrain(abc.ABC):
     async def run_task(self, task: str, event_listener: Optional[Callable] = None) -> BrainResult:
         """Ejecuta una tarea compleja en el cerebro y devuelve un BrainResult."""
         pass
-        
+
     @abc.abstractmethod
     def is_available(self) -> bool:
         """Devuelve True si el cerebro está listo para procesar peticiones."""

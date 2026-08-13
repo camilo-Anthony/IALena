@@ -392,21 +392,9 @@ class CognitivePolicy:
             return ToolDecision.allow("cancelacion_confirmada")
 
         if name == "consultar_estado_tareas":
-            if not self.has_explicit_task_status_request():
-                return ToolDecision.reject(
-                    "ignorado",
-                    "No detecte una pregunta explicita sobre el estado de tareas.",
-                    "estado_tareas_sin_intencion_explicita",
-                )
             return ToolDecision.allow("estado_tareas_confirmado")
 
         if name == "consultar_resumen_hoy":
-            if not self.has_explicit_today_summary_request():
-                return ToolDecision.reject(
-                    "ignorado",
-                    "No detecte una pregunta explicita sobre agenda o pendientes de hoy.",
-                    "resumen_hoy_sin_intencion_explicita",
-                )
             return ToolDecision.allow("resumen_hoy_confirmado")
 
         if name == "ejecutar_hermes_core":

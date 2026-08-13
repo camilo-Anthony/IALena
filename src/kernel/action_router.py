@@ -4,32 +4,40 @@ import time
 import json
 import random
 import asyncio
+import re
 import unicodedata
 from datetime import datetime
 from dataclasses import dataclass, field
+from typing import Dict, Any, List
+
 from google.genai import types
 
-# pyrefly: ignore [missing-import]
-from src.core.interfaces.brain import IAgentBrain
-from src.kernel.synapse import Synapse, TurnState
+try:
+    import winsound as _winsound
+except ImportError:
+    _winsound = None
 
+from src.core.interfaces.brain import IAgentBrain, BrainResult
+from src.kernel.synapse import Synapse, TurnState
+from src.kernel.task_lane import TaskLane, RiskLevel, LaneDecision, classify_tool_call
+from src.kernel.delivery_queue import DeliveryQueue, DeliveryItem
+from src.kernel.capability_registry import capability_registry, TaskCapability
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 _LOCAL_YOUTUBE_SCRIPT = os.path.join(_PROJECT_ROOT, "src", "adapters", "llm", "play_yt.py")
 
 
 @dataclass
-class PendingDelivery:
-    priority: int
-    sequence: int
-    turn_id: str
-    text: str
-    kind: str
-    created_at: float = field(default_factory=time.monotonic)
+class PendingConfirmation:
+    call_id: str
+    tool_name: str
+    prompt: str
+    challenge_phrase: str
+    created_at: float = field(default_factory=time.time)
 
 
 class ActionRouter:
-    """Enruta peticiones complejas de la voz hacia el cerebro asíncrono, orquestando el Synapse."""
+    """Enruta peticiones complejas de la voz hacia el cerebro asíncrono, orquestando el Synapse y carriles."""
     _MUSIC_TERMS = (
         "youtube",
         "musica",
@@ -57,7 +65,7 @@ class ActionRouter:
         TurnState.INJECTING_RESULT,
         TurnState.SPEAKING,
     }
-    
+
     def __init__(
         self,
         brain_adapter: IAgentBrain,
@@ -68,8 +76,11 @@ class ActionRouter:
         activation_gate=None,
         task_ledger=None,
         conversation_sessions=None,
+        brain_fast: IAgentBrain | None = None,
+        delivery_queue: DeliveryQueue | None = None,
     ):
         self.brain = brain_adapter
+        self.brain_fast = brain_fast
         self.synapse = synapse
         self.get_session = get_session_callback
         self.is_busy = is_busy_callback
@@ -79,14 +90,30 @@ class ActionRouter:
         self.conversation_sessions = conversation_sessions
         self._tool_call_reserved = False
         self._queued_task_runner = None
-        self._pending_deliveries: list[PendingDelivery] = []
-        self._delivery_sequence = 0
+        self.pending_confirmation = None
+
+        self._fast_max_parallel = int(os.getenv("FAST_BRAIN_MAX_PARALLEL", "3"))
+        self._fast_tasks_running = 0
+
         self._delivery_idle_seconds = self._read_float_env("RESULT_DELIVERY_IDLE_SECONDS", 1.0)
         self._delivery_poll_seconds = self._read_float_env("RESULT_DELIVERY_POLL_SECONDS", 0.2)
         self._delivery_recent_voice_seconds = self._read_float_env("RESULT_DELIVERY_RECENT_VOICE_SECONDS", 1.5)
         self._delivery_max_wait_seconds = self._read_float_env("RESULT_DELIVERY_MAX_WAIT_SECONDS", 12.0)
         self._delivery_log_seconds = self._read_float_env("RESULT_DELIVERY_LOG_SECONDS", 5.0)
-        
+
+        self.delivery_queue = delivery_queue or DeliveryQueue(
+            is_playback_busy_fn=lambda: self.is_busy() if self.is_busy else False,
+            has_recent_voice_fn=lambda win=None: (
+                self.has_recent_voice(win) if self.has_recent_voice else False
+            ),
+            get_session_fn=lambda: self.get_session() if self.get_session else None,
+            idle_wait_seconds=lambda: self._delivery_idle_seconds,
+            poll_seconds=lambda: self._delivery_poll_seconds,
+            max_wait_seconds=lambda: self._delivery_max_wait_seconds,
+            recent_voice_window=lambda: self._delivery_recent_voice_seconds,
+            log_interval_seconds=lambda: self._delivery_log_seconds,
+        )
+
         self._ACKS = [
             "Entendido, dame un momento para revisarlo.",
             "Claro, estoy en ello. Un segundo...",
@@ -119,6 +146,15 @@ class ActionRouter:
     def has_active_work(self) -> bool:
         return self.is_turn_active() or self.has_unfinished_brain_task()
 
+    def can_accept_lane(self, lane: TaskLane) -> bool:
+        if lane == TaskLane.LOCAL:
+            return True
+        if lane == TaskLane.FAST_HERMES:
+            if self.brain_fast and self.brain_fast.is_available():
+                return self._fast_tasks_running < self._fast_max_parallel
+            return self.can_accept_tool_call()
+        return self.can_accept_tool_call()
+
     def _is_playback_busy(self) -> bool:
         if not self.is_busy:
             return False
@@ -139,82 +175,148 @@ class ActionRouter:
             print(f"[ActionRouter] Error consultando voz reciente: {exc}")
             return False
 
-    def _enqueue_delivery(self, turn_id: str, text: str, kind: str, priority: int) -> PendingDelivery:
-        self._delivery_sequence += 1
-        delivery = PendingDelivery(
-            priority=priority,
-            sequence=self._delivery_sequence,
-            turn_id=turn_id,
-            text=text,
-            kind=kind,
-        )
-        self._pending_deliveries.append(delivery)
-        print(
-            f"[ActionRouter] Resultado en cola para turno {turn_id}: "
-            f"kind={kind}, priority={priority}, queue={len(self._pending_deliveries)}"
-        )
-        return delivery
+    async def run_fast_hermes(self, call_id: str, tool_name: str, prompt: str) -> None:
+        """
+        Ejecuta una tarea de carril rápido de forma asíncrona.
+        """
+        has_fast_brain = bool(self.brain_fast and self.brain_fast.is_available())
 
-    def _remove_delivery(self, delivery: PendingDelivery):
-        self._pending_deliveries = [item for item in self._pending_deliveries if item is not delivery]
+        if not has_fast_brain:
+            # Re-evaluar si la tarea amerita SLOW
+            decision = classify_tool_call(tool_name, {"prompt": prompt})
+            if decision.lane == TaskLane.SLOW_HERMES:
+                print(f"[ActionRouter] FAST no tiene brain_fast. La tarea amerita SLOW. Encolando explícitamente.")
+                await self.queue_hermes_tool_call(call_id, tool_name, prompt)
+                return
 
-    def _next_delivery(self) -> PendingDelivery | None:
-        if not self._pending_deliveries:
-            return None
-        return min(self._pending_deliveries, key=lambda item: (item.priority, item.sequence))
+            print(f"[ActionRouter] FAST rechazado: consulta rápida no disponible (sin brain_fast).")
+            session = self.get_session()
+            if session:
+                try:
+                    await session.send_tool_response(
+                        function_responses=[types.FunctionResponse(
+                            id=call_id,
+                            name=tool_name,
+                            response={
+                                "status": "no_disponible",
+                                "mensaje": "La consulta rápida no está disponible en este momento."
+                            },
+                        )]
+                    )
+                except Exception:
+                    pass
+            return
 
-    async def _wait_for_delivery_slot(self, turn, delivery: PendingDelivery) -> bool:
-        idle_since = None
-        next_log_at = time.monotonic() + self._delivery_log_seconds
+        brain = self.brain_fast
+        lane_tag = "\033[96m[FAST]\033[0m"
 
-        while True:
-            if turn.state in (TurnState.CANCEL_REQUESTED, TurnState.STALE):
-                print(f"[ActionRouter] Entrega cancelada para turno {turn.turn_id}: estado={turn.state.value}")
-                return False
+        if brain is self.brain_fast:
+            if self._fast_tasks_running >= self._fast_max_parallel:
+                print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Límite de paralelas alcanzado ({self._fast_max_parallel}), rechazando.")
+                session = self.get_session()
+                if session:
+                    try:
+                        await session.send_tool_response(
+                            function_responses=[types.FunctionResponse(
+                                id=call_id,
+                                name=tool_name,
+                                response={"status": "rechazada", "mensaje": "Demasiadas tareas rápidas en paralelo."},
+                            )]
+                        )
+                    except Exception:
+                        pass
+                return
+            self._fast_tasks_running += 1
 
-            active = self.synapse.active_turn
-            if active and active.turn_id != turn.turn_id:
-                print(f"[ActionRouter] Entrega descartada: turno {turn.turn_id} ya no es activo.")
-                return False
-
-            output_busy = self._is_playback_busy()
-            user_recent = self._has_recent_user_voice()
-            has_session = self.get_session() is not None
-            is_next = self._next_delivery() is delivery
-            now = time.monotonic()
-            waited = now - delivery.created_at
-            max_wait_reached = (
-                self._delivery_max_wait_seconds > 0
-                and waited >= self._delivery_max_wait_seconds
+        ledger_task = None
+        if self.task_ledger:
+            ledger_task = self.task_ledger.create_task(
+                kind="hermes",
+                prompt=prompt,
+                tool_name=tool_name,
+                origin_call_id=call_id,
+                lane="fast_hermes",
+                priority=30,
             )
-            force_after_wait = has_session and is_next and not output_busy and user_recent and max_wait_reached
-            ready_now = has_session and is_next and not output_busy and not user_recent
+            self.task_ledger.mark_running(ledger_task)
 
-            if force_after_wait:
-                print(
-                    f"[ActionRouter] Entrega forzada para turno {turn.turn_id} tras {waited:.1f}s: "
-                    "voz_reciente seguia activa."
+        print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Ejecutando tarea rápida en paralelo (prompt_chars={len(prompt)})")
+
+        session = self.get_session()
+        if session:
+            try:
+                await session.send_tool_response(
+                    function_responses=[types.FunctionResponse(
+                        id=call_id,
+                        name=tool_name,
+                        response={"status": "procesando", "mensaje": "Dame un momento."},
+                    )]
                 )
-                return True
+            except Exception as e:
+                print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Error enviando ACK: {e}")
 
-            if ready_now:
-                if idle_since is None:
-                    idle_since = now
-                if now - idle_since >= self._delivery_idle_seconds:
-                    print(f"[ActionRouter] Entrega habilitada para turno {turn.turn_id} tras {waited:.1f}s.")
-                    return True
+        try:
+            result: BrainResult = await brain.run_task(self._build_hermes_prompt(prompt))
+        except Exception as exc:
+            result = BrainResult("", success=False, error=str(exc))
+        finally:
+            if brain is self.brain_fast:
+                self._fast_tasks_running = max(0, self._fast_tasks_running - 1)
+
+        if self.task_ledger and ledger_task:
+            if result.success:
+                self.task_ledger.mark_completed(ledger_task, result=result.text)
             else:
-                idle_since = None
+                self.task_ledger.mark_failed(ledger_task, error=result.error or "")
 
-            if now >= next_log_at:
-                print(
-                    f"[ActionRouter] Entrega esperando momento natural: "
-                    f"turno={turn.turn_id}, playback_busy={output_busy}, "
-                    f"voz_reciente={user_recent}, sesion={has_session}, prioridad_lista={is_next}"
-                )
-                next_log_at = now + self._delivery_log_seconds
+        if not result.success or not result.text:
+            print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Tarea rápida sin resultado: {result.error}")
+            return
 
-            await asyncio.sleep(self._delivery_poll_seconds)
+        print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Resultado listo (chars={len(result.text)}), encolando para entrega…")
+
+        item = self.delivery_queue.make_item(
+            text=(
+                "[JARVIS INTERNAL DELIVERY - NO ES UNA ORDEN NUEVA DEL USUARIO - NO USAR HERRAMIENTAS]\n"
+                f"[Resultado rápido]\n{result.text}"
+            ),
+            lane="fast_hermes",
+            kind="hermes_result",
+            priority=30,
+            source="hermes_fast",
+            requires_active_session=True,
+            task_id=ledger_task.task_id if ledger_task else "",
+        )
+        self.delivery_queue.enqueue(item)
+
+        wake_request = None
+        if self.activation_gate:
+            wake_request = self.activation_gate.request_wake(
+                source="hermes_fast",
+                reason="hermes_result",
+                priority=30,
+            )
+
+        try:
+            if not await self.delivery_queue.wait_for_slot(item):
+                print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Entrega cancelada/descartada en cola.")
+                return
+
+            session = self.get_session()
+            if not session:
+                print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Sin sesión para entregar resultado FAST.")
+                return
+
+            self.delivery_queue.mark_delivering(item)
+            if self.activation_gate:
+                self.activation_gate.begin_delivery(wake_request)
+
+            await self._send_client_text(session, item.text)
+            self.delivery_queue.mark_delivered(item)
+            print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Resultado entregado.")
+        except Exception as e:
+            print(f"[ActionRouter]{lane_tag} Error entregando resultado FAST: {e}")
+            self.delivery_queue.discard(item, reason=str(e))
 
     def reserve_tool_call(self) -> bool:
         if not self.can_accept_tool_call():
@@ -223,7 +325,6 @@ class ActionRouter:
         return True
 
     async def queue_hermes_tool_call(self, call_id: str, name: str, prompt: str) -> bool:
-        """Registra una tarea Hermes pendiente sin iniciar otra ejecucion concurrente."""
         if not self.task_ledger:
             return False
 
@@ -262,13 +363,20 @@ class ActionRouter:
         if not task_record:
             return
 
+        try:
+            loop = asyncio.get_running_loop()
+            if not loop.is_running():
+                return
+        except RuntimeError:
+            return
+
         self._tool_call_reserved = True
         task_name = task_record.tool_name or "ejecutar_hermes_core"
         print(
             f"[ActionRouter] Despachando tarea Hermes en cola: task={task_record.task_id}, "
             f"prompt_chars={len(task_record.prompt)}"
         )
-        self._queued_task_runner = asyncio.create_task(
+        self._queued_task_runner = loop.create_task(
             self.run_hermes(
                 "",
                 task_name,
@@ -279,72 +387,59 @@ class ActionRouter:
         )
 
     def task_status_payload(self) -> dict:
-        if not self.task_ledger:
-            active = self.synapse.active_turn
-            active_desc = active.state.value if active else "sin_registro"
+        if self.pending_confirmation:
             return {
-                "status": active_desc,
-                "active": bool(active and active.state in self._ACTIVE_STATES),
-                "pending": 0,
-                "message": "No tengo un registro local de tareas disponible ahora.",
-            }
-
-        running = self.task_ledger.running_tasks("hermes")
-        pending = self.task_ledger.pending_tasks("hermes")
-        recent = self.task_ledger.recent_tasks(5)
-        last_done = next(
-            (
-                task for task in reversed(recent)
-                if task.status.value in {"completed", "failed", "interrupted", "stale"}
-            ),
-            None,
-        )
-
-        if running:
-            message = "Sigo trabajando en una tarea compleja."
-            if pending:
-                message += f" Tengo {len(pending)} tarea pendiente en cola."
-            else:
-                message += " No hay más tareas en cola."
-            return {
-                "status": "running",
+                "status": "pending_confirmation",
                 "active": True,
-                "pending": len(pending),
-                "active_task_id": running[-1].task_id,
-                "message": message,
-            }
-
-        if pending:
-            return {
-                "status": "queued",
-                "active": False,
-                "pending": len(pending),
-                "message": f"Tengo {len(pending)} tarea pendiente en cola. La ejecutaré cuando el sistema quede libre.",
-            }
-
-        if last_done:
-            if last_done.status.value == "completed":
-                message = "La última tarea compleja ya terminó."
-            elif last_done.status.value == "failed":
-                message = "La última tarea compleja falló."
-            elif last_done.status.value == "interrupted":
-                message = "La última tarea compleja fue interrumpida."
-            else:
-                message = "La última tarea compleja quedó descartada por quedar vieja."
-            return {
-                "status": last_done.status.value,
-                "active": False,
                 "pending": 0,
-                "last_task_id": last_done.task_id,
-                "message": message,
+                "running_slow_count": 0,
+                "pending_slow_count": 0,
+                "running_fast_count": 0,
+                "message": f"Esperando confirmación verbal para: {self.pending_confirmation.prompt}. Por favor repite: {self.pending_confirmation.challenge_phrase}"
             }
 
-        return {
-            "status": "idle",
-            "active": False,
-            "pending": 0,
-            "message": "No tengo tareas complejas activas ni pendientes.",
+        if not self.task_ledger:
+            return {"status": "idle", "active": False, "pending": 0, "message": "No hay registro de tareas disponible."}
+
+        running_slow = self.task_ledger.running_tasks(lane="slow_hermes")
+        pending_slow = self.task_ledger.pending_tasks(lane="slow_hermes")
+        running_fast = self.task_ledger.running_tasks(lane="fast_hermes")
+
+        active = bool(running_slow or running_fast)
+        status = "idle"
+        if running_slow or running_fast:
+            status = "running"
+        elif pending_slow:
+            status = "queued"
+
+        message = ""
+        if running_slow:
+            message = "Sigo trabajando en una tarea compleja."
+            if pending_slow:
+                message += f" Tengo {len(pending_slow)} tarea(s) en cola."
+            if running_fast:
+                message += " Y tengo una consulta rápida activa en este momento."
+        elif running_fast:
+            message = "Tengo una consulta rápida activa en este momento."
+        else:
+            if pending_slow:
+                message = f"Tengo {len(pending_slow)} tarea(s) en cola."
+            else:
+                message = "Todos los carriles están disponibles. No hay tareas en ejecución."
+
+        payload = {
+            "status": status,
+            "active": bool(running_slow or running_fast),
+            "pending": len(pending_slow),
+            "running_slow_count": len(running_slow),
+            "pending_slow_count": len(pending_slow),
+            "running_fast_count": len(running_fast),
+            "message": message,
+            "capabilities": capability_registry.snapshot_payload(),
         }
+        if running_slow:
+            payload["active_task_id"] = running_slow[-1].task_id
+        return payload
 
     @staticmethod
     def _today_iso() -> str:
@@ -405,7 +500,6 @@ class ActionRouter:
         agenda_configured = bool(os.getenv("JARVIS_AGENDA_FILE", "").strip())
 
         parts = []
-        
         try:
             from hermes_constants import get_hermes_home
             home = get_hermes_home()
@@ -416,59 +510,24 @@ class ActionRouter:
                         mem_content = f.read().strip()
                         if mem_content:
                             parts.append(f"Resumen de mi memoria reciente operativa:\n{mem_content[-1500:]}")
-        except Exception as e:
-            print(f"[ActionRouter] Error leyendo MEMORY.md para el resumen: {e}")
-
-        if task_status.get("active") or task_status.get("pending"):
-            parts.append(str(task_status.get("message", "")).strip())
-        else:
-            parts.append("No tengo tareas complejas activas ni pendientes en este instante.")
-
-        if agenda_items:
-            parts.append("Agenda local de hoy: " + "; ".join(agenda_items[:3]))
-        elif agenda_configured:
-            parts.append("No encontre eventos locales para hoy en la agenda configurada.")
+        except Exception:
+            pass
 
         return {
             "status": "ok",
             "date": today_iso,
-            "task_status": task_status,
             "agenda_configured": agenda_configured,
             "agenda_items": agenda_items,
-            "message": "\n\n".join(part for part in parts if part),
+            "task_status": task_status,
+            "memory_summary": "\n".join(parts) if parts else "No hay memoria operativa de Hermes disponible en este momento."
         }
 
-    async def send_task_status_tool_call(self, call_id: str, name: str):
-        payload = self.task_status_payload()
-        session = self.get_session()
-        print(
-            f"[ActionRouter] Estado de tareas solicitado: "
-            f"status={payload.get('status')}, pending={payload.get('pending')}"
-        )
-        if not session:
-            return
-        try:
-            await session.send_tool_response(
-                function_responses=[
-                    types.FunctionResponse(
-                        id=call_id,
-                        name=name,
-                        response=payload,
-                    )
-                ]
-            )
-        except Exception as exc:
-            print(f"[ActionRouter] Error respondiendo estado de tareas: {exc}")
-
     async def send_today_summary_tool_call(self, call_id: str, name: str):
-        payload = self.today_summary_payload()
         session = self.get_session()
-        print(
-            f"[ActionRouter] Resumen de hoy solicitado: "
-            f"date={payload.get('date')}, agenda_items={len(payload.get('agenda_items', []))}"
-        )
         if not session:
             return
+        payload = self.today_summary_payload()
+        print(f"[ActionRouter] Resumen de hoy solicitado: date={payload['date']}, agenda_items={len(payload['agenda_items'])}")
         try:
             await session.send_tool_response(
                 function_responses=[
@@ -480,7 +539,26 @@ class ActionRouter:
                 ]
             )
         except Exception as exc:
-            print(f"[ActionRouter] Error respondiendo resumen de hoy: {exc}")
+            print(f"[ActionRouter] Error respondiendo tool call de resumen de hoy: {exc}")
+
+    async def send_task_status_tool_call(self, call_id: str, name: str):
+        session = self.get_session()
+        if not session:
+            return
+        payload = self.task_status_payload()
+        print(f"[ActionRouter] Estado de tareas solicitado: status={payload['status']}, pending={payload['pending']}")
+        try:
+            await session.send_tool_response(
+                function_responses=[
+                    types.FunctionResponse(
+                        id=call_id,
+                        name=name,
+                        response=payload,
+                    )
+                ]
+            )
+        except Exception as exc:
+            print(f"[ActionRouter] Error respondiendo tool call de estado de tareas: {exc}")
 
     async def reject_busy_tool_call(self, call_id: str, name: str):
         """Cierra una tool call extra sin arrancar otra tarea Hermes."""
@@ -493,122 +571,6 @@ class ActionRouter:
         session = self.get_session()
         if session:
             await self._send_busy_tool_response(session, call_id, name)
-
-    async def cancel_active_tool_call(self, call_id: str, name: str):
-        """Cancela la tarea Hermes activa solo cuando el usuario lo pide explicitamente."""
-        active = self.synapse.active_turn
-        session = self.get_session()
-
-        if not self.has_active_work():
-            pending = self.task_ledger.next_pending("hermes") if self.task_ledger else None
-            if pending and self.task_ledger:
-                self.task_ledger.mark_interrupted(pending, "cancelada antes de ejecutarse")
-                print(f"[ActionRouter] Tarea pendiente cancelada: task={pending.task_id}")
-                if session:
-                    await self._send_cancel_tool_response(
-                        session,
-                        call_id,
-                        name,
-                        "cancelada_pendiente",
-                        "Cancelé la siguiente tarea compleja que estaba en cola.",
-                    )
-                self._schedule_next_queued_task()
-                return
-
-            print("[ActionRouter] Cancelacion solicitada, pero no hay tarea Hermes activa.")
-            if session:
-                await self._send_cancel_tool_response(
-                    session,
-                    call_id,
-                    name,
-                    "sin_tarea",
-                    "No hay una tarea compleja activa para cancelar.",
-                )
-            return
-
-        active_desc = f"{active.turn_id} ({active.state.value})" if active else "desconocido"
-        print(f"[ActionRouter] Cancelacion explicita de turno activo: {active_desc}")
-        if session:
-            await self._send_cancel_tool_response(
-                session,
-                call_id,
-                name,
-                "cancelando",
-                "Estoy cancelando la tarea compleja que estaba en curso.",
-            )
-        await self.interrupt_active_turn("Usuario pidio cancelar la tarea activa.")
-
-    def _computing_sound(self):
-        """Efecto de sonido JARVIS sin interrumpir la voz."""
-        try:
-            import winsound
-            wav_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "voice", "assets", "jarvis_processing.wav")
-            if os.path.exists(wav_path):
-                winsound.PlaySound(wav_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-        except Exception:
-            pass
-
-    @staticmethod
-    def _normalize_intent(text: str) -> str:
-        text = unicodedata.normalize("NFKD", text or "")
-        text = "".join(ch for ch in text if not unicodedata.combining(ch))
-        text = text.lower().replace(".", " ").replace(",", " ")
-        return " ".join(text.split())
-
-    @classmethod
-    def _contains_any(cls, normalized_text: str, terms: tuple[str, ...]) -> bool:
-        tokens = set(normalized_text.split())
-        for term in terms:
-            normalized_term = cls._normalize_intent(term)
-            if " " in normalized_term:
-                if normalized_term in normalized_text:
-                    return True
-            elif normalized_term in tokens:
-                return True
-        return False
-
-    @classmethod
-    def _is_music_or_youtube_request(cls, prompt: str) -> bool:
-        normalized = cls._normalize_intent(prompt)
-        if not normalized:
-            return False
-        if cls._contains_any(normalized, cls._MUSIC_NEGATIVE_TERMS):
-            return False
-        return cls._contains_any(normalized, cls._MUSIC_TERMS)
-
-    @staticmethod
-    def _cmd_quote(value: str) -> str:
-        return '"' + value.replace('"', '\\"') + '"'
-
-    def _local_youtube_instruction(self, prompt: str) -> str:
-        if not self._is_music_or_youtube_request(prompt):
-            return ""
-        python_exe = self._cmd_quote(sys.executable)
-        script_path = self._cmd_quote(_LOCAL_YOUTUBE_SCRIPT)
-        return (
-            "\n[CAPACIDAD LOCAL - MUSICA/YOUTUBE]\n"
-            "La herramienta directa de YouTube de Live esta desactivada. "
-            "Para cumplir tareas de reproducir musica, canciones, videos o YouTube, usa la herramienta terminal.\n"
-            f"Ejecuta este formato, reemplazando <busqueda> por la cancion o video solicitado: {python_exe} {script_path} \"<busqueda>\"\n"
-            "No uses memory, todo ni session_search para reproducir musica. No respondas solo texto si el usuario pidio reproducir. "
-            "Despues de ejecutar el comando, responde breve: Listo, lo abri en YouTube.\n"
-        )
-
-    def _build_hermes_prompt(self, prompt: str) -> str:
-        bot_name = os.getenv("ASSISTANT_NAME", "JARVIS")
-        user_name = os.getenv("USER_NAME", "Señor")
-
-        return (
-            f"[IDENTIDAD CRÍTICA]\n"
-            f"Eres el núcleo lógico e investigativo del asistente '{bot_name}'. "
-            f"El usuario '{user_name}' te ha pedido algo mediante la interfaz de voz.\n\n"
-            f"[CONTEXTO DEL SISTEMA - Windows 11]\n"
-            "IMPORTANTE: Estás operando en Windows 11. Usa tus herramientas para cumplir la orden.\n"
-            f"{self._local_youtube_instruction(prompt)}\n"
-            f"TAREA DEL USUARIO: {prompt}\n\n"
-            "[INSTRUCCIÓN INTERNA]: Resuelve la tarea. Devuelve SOLO los datos o el resultado final. "
-            "NUNCA redactes un saludo."
-        )
 
     async def interrupt_active_turn(self, reason: str = "Cancelacion explicita."):
         """Cancela cooperativamente Hermes; no se debe llamar por un barge-in de voz normal."""
@@ -632,7 +594,7 @@ class ActionRouter:
         if active.state != TurnState.CANCEL_REQUESTED:
             self.synapse.change_state(TurnState.CANCEL_REQUESTED, turn_id=active.turn_id)
         self.brain.interrupt(reason)
-        
+
         # Esperar a que la tarea termine cooperativamente
         if active.brain_task and not active.brain_task.done():
             try:
@@ -647,6 +609,46 @@ class ActionRouter:
         elif active.state == TurnState.CANCEL_REQUESTED:
             self.synapse.change_state(TurnState.INTERRUPTED, turn_id=active.turn_id)
 
+    async def cancel_active_tool_call(self, call_id: str, name: str):
+        """Cancela la tarea Hermes activa solo cuando el usuario lo pide explicitamente."""
+        active = self.synapse.active_turn
+        session = self.get_session()
+
+        if not self.has_active_work():
+            pending = self.task_ledger.next_pending("hermes") if self.task_ledger else None
+            if pending and self.task_ledger:
+                self.task_ledger.mark_interrupted(pending, "cancelada antes de ejecutarse")
+                if session:
+                    await self._send_cancel_tool_response(
+                        session, call_id, name, "cancelada_pendiente", "He cancelado la tarea que estaba en cola de espera."
+                    )
+                return
+
+            if session:
+                await self._send_cancel_tool_response(
+                    session, call_id, name, "no_active_task", "No hay ninguna tarea compleja ejecutándose en este momento."
+                )
+            return
+
+        print(f"[ActionRouter] Solicitud de cancelación para turno activo {active.turn_id}.")
+        self.synapse.change_state(TurnState.CANCEL_REQUESTED, turn_id=active.turn_id)
+        await self.interrupt_active_turn("Cancelado por el usuario mediante voz.")
+
+        deadline = time.monotonic() + 5.0
+        while active.state in (TurnState.CANCEL_REQUESTED, TurnState.BRAIN_RUNNING) and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+
+        if active.state == TurnState.INTERRUPTED:
+            if session:
+                await self._send_cancel_tool_response(
+                    session, call_id, name, "success", "He cancelado la tarea compleja actual de inmediato."
+                )
+        else:
+            if session:
+                await self._send_cancel_tool_response(
+                    session, call_id, name, "timeout", "He solicitado la cancelación, pero está tomando un momento en detenerse."
+                )
+
     async def run_hermes(
         self,
         call_id: str,
@@ -654,23 +656,21 @@ class ActionRouter:
         prompt: str,
         task_record=None,
         send_ack: bool = True,
-    ):
-        """Orquesta un nuevo turno de pensamiento con el Cerebro."""
-        turn = None
-        try:
-            # 1. No iniciar otra tarea compleja encima de una activa.
-            if self.has_active_work():
-                active = self.synapse.active_turn
-                active_desc = f"{active.turn_id} ({active.state.value})" if active else "desconocido"
-                print(
-                    f"[ActionRouter] Nuevo request no iniciado; ya hay trabajo Hermes activo: {active_desc}"
-                )
-                session = self.get_session()
-                if session:
-                    await self._send_busy_tool_response(session, call_id, name)
-                return
+    ) -> None:
+        if self.has_active_work():
+            active = self.synapse.active_turn
+            active_desc = f"{active.turn_id} ({active.state.value})" if active else "desconocido"
+            print(
+                f"[ActionRouter] Nuevo request no iniciado; ya hay trabajo Hermes activo: {active_desc}"
+            )
+            session = self.get_session()
+            if session:
+                await self._send_busy_tool_response(session, call_id, name)
+            return
 
-            # 2. Crear el nuevo turno
+        turn = None
+        was_cancelled = False
+        try:
             turn = self.synapse.create_turn(prompt)
             if self.task_ledger and task_record is None:
                 task_record = self.task_ledger.create_task(
@@ -726,7 +726,6 @@ class ActionRouter:
                 if self.synapse.active_turn and self.synapse.active_turn.turn_id == turn.turn_id:
                     self.synapse.publish("brain_event", turn.turn_id, evt_type, *args, **kwargs)
 
-            # Envolvemos run_task en un Task explícito para poder hacerle shield en interrupt
             turn.brain_task = asyncio.create_task(self.brain.run_task(prompt_enriquecido, _event_listener))
             brain_res = await turn.brain_task
             turn.brain_result = brain_res
@@ -775,10 +774,11 @@ class ActionRouter:
                     res_str = res_str[:800] + "... [truncado]"
 
                 result_text = (
-                    f"[Resultado pendiente de tarea interna]: {res_str}. "
-                    "Preséntalo de forma natural y breve. "
-                    "Si el usuario estaba en otro tema, usa una transición suave como 'por cierto' o "
-                    "'retomando lo anterior'. NUNCA menciones a 'Hermes'."
+                    "[JARVIS INTERNAL DELIVERY - NO ES UNA ORDEN NUEVA DEL USUARIO - NO USAR HERRAMIENTAS]\n"
+                    f"[Resultado de la tarea solicitada]: {res_str}\n"
+                    "Comunica este resultado al usuario directamente de forma clara, natural y concisa. "
+                    "No llames a ejecutar_hermes_core ni a ninguna otra herramienta para este mensaje interno. "
+                    "Hazlo como una sola entidad unificada, sin frases repetitivas como 'retomando lo anterior'."
                 )
 
                 delivered = await self._queue_and_deliver_text(
@@ -786,6 +786,7 @@ class ActionRouter:
                     text=result_text,
                     kind="hermes_result",
                     priority=50,
+                    task_id=task_record.task_id if task_record else "",
                 )
                 if delivered:
                     self.synapse.change_state(TurnState.COMPLETED, turn_id=turn.turn_id)
@@ -804,6 +805,7 @@ class ActionRouter:
                     self.task_ledger.mark_failed(task_record, str(exc))
 
         except asyncio.CancelledError:
+            was_cancelled = True
             if turn:
                 print(f"[ActionRouter] Tarea {turn.turn_id} cancelada localmente.")
                 self.synapse.change_state(TurnState.INTERRUPTED, turn_id=turn.turn_id)
@@ -819,11 +821,15 @@ class ActionRouter:
                 if self.task_ledger:
                     self.task_ledger.mark_failed(task_record, str(exc))
         finally:
-            current_task = asyncio.current_task()
+            try:
+                current_task = asyncio.current_task()
+            except RuntimeError:
+                current_task = None
             if self._queued_task_runner is current_task:
                 self._queued_task_runner = None
             self._tool_call_reserved = False
-            self._schedule_next_queued_task()
+            if not was_cancelled:
+                self._schedule_next_queued_task()
 
     async def _send_client_text(self, session, text: str):
         await session.send_client_content(
@@ -836,8 +842,17 @@ class ActionRouter:
             turn_complete=True,
         )
 
-    async def _queue_and_deliver_text(self, turn, text: str, kind: str, priority: int) -> bool:
-        delivery = self._enqueue_delivery(turn.turn_id, text, kind=kind, priority=priority)
+    async def _queue_and_deliver_text(self, turn, text: str, kind: str, priority: int, task_id: str = "") -> bool:
+        item = self.delivery_queue.make_item(
+            text=text,
+            lane="slow_hermes" if kind == "hermes_result" else "local",
+            kind=kind,
+            priority=priority,
+            source="hermes",
+            turn_id=turn.turn_id,
+            task_id=task_id,
+        )
+        self.delivery_queue.enqueue(item)
         wake_request = None
         if self.activation_gate:
             wake_request = self.activation_gate.request_wake(
@@ -847,7 +862,7 @@ class ActionRouter:
                 turn_id=turn.turn_id,
             )
         try:
-            if not await self._wait_for_delivery_slot(turn, delivery):
+            if not await self.delivery_queue.wait_for_slot(item):
                 return False
 
             if self.synapse.active_turn and self.synapse.active_turn.turn_id != turn.turn_id:
@@ -859,13 +874,405 @@ class ActionRouter:
                 print(f"[ActionRouter] Entrega pospuesta sin sesión activa: turno={turn.turn_id}")
                 return False
 
+            self.delivery_queue.mark_delivering(item)
             if self.activation_gate:
                 self.activation_gate.begin_delivery(wake_request)
-            await self._send_client_text(current_session, delivery.text)
+
+            await self._send_client_text(current_session, item.text)
+            self.delivery_queue.mark_delivered(item)
             print(f"[ActionRouter] Entrega enviada: turno={turn.turn_id}, kind={kind}")
             return True
         finally:
-            self._remove_delivery(delivery)
+            # Eliminar si sigue presente por descarte asíncrono
+            if item in self.delivery_queue._items:
+                self.delivery_queue._items.remove(item)
+
+    async def _inject_brain_failure(self, turn, reason: str):
+        if self.synapse.active_turn and self.synapse.active_turn.turn_id != turn.turn_id:
+            print(f"[ActionRouter] Fallo tardío descartado para turno {turn.turn_id}: {reason}")
+            return
+
+        failure_text = (
+            "[JARVIS INTERNAL DELIVERY - NO ES UNA ORDEN NUEVA DEL USUARIO - NO USAR HERRAMIENTAS]\n"
+            f"[Fallo de tarea interna]: No pude completar esa tarea ahora. Motivo técnico breve: {reason}. "
+            "Díselo al usuario de forma natural y breve, sin mencionar Hermes. "
+            "No llames a ejecutar_hermes_core ni a ninguna otra herramienta para este mensaje interno."
+        )
+        try:
+            await self._queue_and_deliver_text(turn, failure_text, kind="hermes_failure", priority=10)
+        except Exception as exc:
+            print(f"[ActionRouter] Error inyectando fallo de cerebro: {exc}")
+
+    def _computing_sound(self):
+        if _winsound:
+            try:
+                _winsound.Beep(2000, 80)
+            except Exception:
+                pass
+
+    @classmethod
+    def _normalize_intent(cls, text: str) -> str:
+        text = unicodedata.normalize("NFKD", text or "")
+        text = "".join(ch for ch in text if not unicodedata.combining(ch))
+        text = re.sub(r"[^a-zA-Z0-9\s']", " ", text.lower())
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _contains_any(cls, normalized_text: str, terms: tuple) -> bool:
+        tokens = set(normalized_text.split())
+        for term in terms:
+            normalized_term = cls._normalize_intent(term)
+            if " " in normalized_term:
+                if normalized_term in normalized_text:
+                    return True
+            elif normalized_term in tokens:
+                return True
+        return False
+
+    @classmethod
+    def _is_music_or_youtube_request(cls, prompt: str) -> bool:
+        normalized = cls._normalize_intent(prompt)
+        if not normalized:
+            return False
+        if cls._contains_any(normalized, cls._MUSIC_NEGATIVE_TERMS):
+            return False
+        return cls._contains_any(normalized, cls._MUSIC_TERMS)
+
+    @staticmethod
+    def _cmd_quote(value: str) -> str:
+        return '"' + value.replace('"', '\\"') + '"'
+
+    def _local_youtube_instruction(self, prompt: str) -> str:
+        if not self._is_music_or_youtube_request(prompt):
+            return ""
+        python_exe = self._cmd_quote(sys.executable)
+        script_path = self._cmd_quote(_LOCAL_YOUTUBE_SCRIPT)
+        return (
+            "\n[CAPACIDAD LOCAL - MUSICA/YOUTUBE]\n"
+            "La herramienta directa de YouTube de Live esta desactivada. "
+            "Para cumplir tareas de reproducir musica, canciones, videos o YouTube, usa la herramienta terminal.\n"
+            f"Ejecuta este formato, reemplazando <busqueda> por la cancion o video solicitado: {python_exe} {script_path} \"<busqueda>\"\n"
+            "No uses memory, todo ni session_search para reproducir musica. No respondas solo texto si el usuario pidio reproducir. "
+            "Despues de ejecutar el comando, responde breve: Listo, lo abri en YouTube.\n"
+        )
+
+    def _build_hermes_prompt(self, prompt: str) -> str:
+        bot_name = os.getenv("ASSISTANT_NAME", "JARVIS")
+        user_name = os.getenv("USER_NAME", "Señor")
+
+        res = (
+            f"[IDENTIDAD CRÍTICA]\n"
+            f"Eres el núcleo lógico e investigativo del asistente '{bot_name}'. "
+            f"El usuario '{user_name}' te ha pedido algo mediante la interfaz de voz.\n\n"
+            f"[CONTEXTO DEL SISTEMA - Windows 11]\n"
+            "IMPORTANTE: Estás operando en Windows 11. Usa tus herramientas para cumplir la orden.\n"
+            f"{self._local_youtube_instruction(prompt)}\n"
+            f"TAREA DEL USUARIO: {prompt}\n\n"
+            "[INSTRUCCIÓN INTERNA]: Resuelve la tarea. Devuelve SOLO los datos o el resultado final. "
+            "NUNCA redactes un saludo."
+        )
+
+        if self.conversation_sessions:
+            ctx = self.conversation_sessions.active_context_text()
+            if ctx:
+                res = (
+                    "[TRANSCRIPCION_VOZ_RECIENTE_ESTA_SESION]\n"
+                    f"{ctx}\n"
+                    "-------------------------------------------\n"
+                    f"{res}"
+                )
+        return res
+
+    async def submit_tool_call(
+        self,
+        tool_name: str,
+        args: dict,
+        session,
+        call_id: str,
+        transcript_context: str | None = None,
+    ) -> None:
+        """
+        Punto de entrada unificado para todas las tool calls.
+        Clasifica, valida seguridad/capacidades y despacha la tarea.
+        """
+        prompt = args.get("prompt", "")
+        prompt_chars = len(prompt)
+
+        # 1. Interceptar si hay una confirmación verbal pendiente
+        if self.pending_confirmation:
+            user_response = self._normalize_intent(prompt)
+            challenge = self._normalize_intent(self.pending_confirmation.challenge_phrase)
+
+            orig_conf = self.pending_confirmation
+            self.pending_confirmation = None  # Consumir confirmación de inmediato
+
+            # Afirmaciones comunes simples no son suficientes
+            if user_response in ("si", "ok", "dale", "proceder", "adelante", "okey", "vale", "listo", "yes", "go"):
+                print(f"[LaneRouter] Afirmacion simple no es suficiente para confirmar call={orig_conf.call_id}")
+                if session:
+                    try:
+                        await session.send_tool_response(
+                            function_responses=[types.FunctionResponse(
+                                id=call_id,
+                                name=tool_name,
+                                response={
+                                    "status": "rechazada",
+                                    "mensaje": f"Confirmación insuficiente. Para proceder con esta acción de alto riesgo, debes repetir exactamente la frase: '{orig_conf.challenge_phrase}'."
+                                },
+                            )]
+                        )
+                    except Exception:
+                        pass
+                return
+
+            if challenge in user_response:
+                # Confirmación exitosa! Procedemos a ejecutar la tarea original.
+                print(f"[LaneRouter] Confirmacion exitosa para call={orig_conf.call_id} challenge='{orig_conf.challenge_phrase}'")
+
+                # Enviar respuesta de confirmación procesada a la tool call actual
+                if session:
+                    try:
+                        await session.send_tool_response(
+                            function_responses=[types.FunctionResponse(
+                                id=call_id,
+                                name=tool_name,
+                                response={
+                                    "status": "confirmada",
+                                    "mensaje": "Confirmación recibida. Procediendo con la tarea."
+                                },
+                            )]
+                        )
+                    except Exception:
+                        pass
+
+                # Ejecutar la tarea original
+                orig_decision = classify_tool_call(orig_conf.tool_name, {"prompt": orig_conf.prompt})
+                if orig_decision.lane == TaskLane.FAST_HERMES:
+                    asyncio.create_task(self.run_fast_hermes(orig_conf.call_id, orig_conf.tool_name, orig_conf.prompt))
+                else:
+                    if not self.can_accept_lane(TaskLane.SLOW_HERMES) or not self.reserve_tool_call():
+                        await self.queue_hermes_tool_call(orig_conf.call_id, orig_conf.tool_name, orig_conf.prompt)
+                    else:
+                        asyncio.create_task(self.run_hermes(orig_conf.call_id, orig_conf.tool_name, orig_conf.prompt, send_ack=False))
+                return
+            elif any(term in user_response for term in ("cancela", "cancelar", "no", "abortar")):
+                print(f"[LaneRouter] Confirmacion cancelada por el usuario para call={orig_conf.call_id}")
+                if session:
+                    try:
+                        await session.send_tool_response(
+                            function_responses=[types.FunctionResponse(
+                                id=call_id,
+                                name=tool_name,
+                                response={
+                                    "status": "cancelada",
+                                    "mensaje": "Operación de riesgo cancelada por el usuario."
+                                },
+                            )]
+                        )
+                    except Exception:
+                        pass
+                return
+            else:
+                print(f"[LaneRouter] Confirmacion incorrecta para call={orig_conf.call_id}. Recibido: '{prompt}'")
+                if session:
+                    try:
+                        await session.send_tool_response(
+                            function_responses=[types.FunctionResponse(
+                                id=call_id,
+                                name=tool_name,
+                                response={
+                                    "status": "rechazada",
+                                    "mensaje": f"Confirmación incorrecta. Esperaba exactamente '{orig_conf.challenge_phrase}'. Tarea cancelada por seguridad."
+                                },
+                            )]
+                        )
+                    except Exception:
+                        pass
+                return
+
+        decision: LaneDecision = classify_tool_call(tool_name, args)
+        lane = decision.lane
+
+        lane_str = "local"
+        if lane == TaskLane.FAST_HERMES:
+            lane_str = "fast_hermes"
+        elif lane == TaskLane.SLOW_HERMES:
+            lane_str = "slow_hermes"
+
+        reason_str = "local_tool_execution"
+        if lane == TaskLane.FAST_HERMES:
+            reason_str = "fast_brain_execution"
+        elif lane == TaskLane.SLOW_HERMES:
+            reason_str = "slow_brain_execution"
+
+        print(f"[LaneRouter] call={call_id} tool={tool_name} lane={lane_str} reason={reason_str} prompt_chars={prompt_chars}")
+
+        # 2. Validación de capacidades para carriles de Hermes
+        if lane != TaskLane.LOCAL:
+            missing_caps = []
+            registry_lane = "slow" if lane == TaskLane.SLOW_HERMES else "fast"
+            for cap in decision.required_capabilities:
+                if not capability_registry.has_capability(registry_lane, cap):
+                    missing_caps.append(cap.value)
+            if missing_caps:
+                missing_str = "/".join(missing_caps)
+                print(f"[LaneRouter] reject call={call_id} lane={lane_str} reason=missing_capabilities_{missing_str}")
+                if session:
+                    try:
+                        await session.send_tool_response(
+                            function_responses=[types.FunctionResponse(
+                                id=call_id,
+                                name=tool_name,
+                                response={
+                                    "status": "error",
+                                    "mensaje": f"No tengo activo el acceso de {missing_str} para crear eso."
+                                },
+                            )]
+                        )
+                    except Exception:
+                        pass
+                return
+
+            # 3. Flujo de Riesgo Medio Ambiguo (Fase C.2)
+            if decision.risk == RiskLevel.MEDIUM and decision.is_ambiguous:
+                print(f"[LaneRouter] reject call={call_id} lane={lane_str} reason=medium_risk_ambiguous")
+                if session:
+                    try:
+                        await session.send_tool_response(
+                            function_responses=[types.FunctionResponse(
+                                id=call_id,
+                                name=tool_name,
+                                response={
+                                    "status": "aclaracion_requerida",
+                                    "mensaje": "Por favor, sé más específico sobre qué archivo o cambio deseas realizar."
+                                },
+                            )]
+                        )
+                    except Exception:
+                        pass
+                return
+
+            # 4. Flujo de Alto Riesgo con Desafío Verbal (Fase C.3)
+            if decision.risk == RiskLevel.HIGH:
+                # Generar una frase de desafío simple y relevante
+                normalized = self._normalize_intent(prompt)
+                verbo = "proceder"
+                if "borra" in normalized or "elimina" in normalized or "destruye" in normalized:
+                    verbo = "confirmar eliminacion"
+                elif "sobrescribe" in normalized or "modifica" in normalized or "edita" in normalized:
+                    verbo = "autorizar cambio"
+                else:
+                    verbo = "confirmar accion peligrosa"
+
+                challenge_phrase = verbo
+                self.pending_confirmation = PendingConfirmation(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    prompt=prompt,
+                    challenge_phrase=challenge_phrase
+                )
+                print(f"[LaneRouter] Pending confirmation for call={call_id} lane={lane_str} risk=HIGH challenge='{challenge_phrase}'")
+
+                if session:
+                    try:
+                        await session.send_tool_response(
+                            function_responses=[types.FunctionResponse(
+                                id=call_id,
+                                name=tool_name,
+                                response={
+                                    "status": "confirmacion_pendiente",
+                                    "challenge_phrase": challenge_phrase,
+                                    "mensaje": f"Esta acción es de alto riesgo. Para proceder, por favor repite exactamente la frase: {challenge_phrase}"
+                                },
+                            )]
+                        )
+                    except Exception:
+                        pass
+                return
+
+        if lane == TaskLane.LOCAL:
+            print(f"[LaneRouter] accept call={call_id} lane={lane_str}")
+            await self.run_local_tool(tool_name, args, session, call_id)
+        elif lane == TaskLane.FAST_HERMES:
+            if not self.can_accept_lane(TaskLane.FAST_HERMES):
+                print(f"[LaneRouter] reject call={call_id} lane={lane_str} reason=fast_lane_busy_or_saturated")
+                if session:
+                    try:
+                        await session.send_tool_response(
+                            function_responses=[types.FunctionResponse(
+                                id=call_id,
+                                name=tool_name,
+                                response={
+                                    "status": "ocupado",
+                                    "mensaje": "El sistema está ocupado procesando otra tarea en este momento."
+                                },
+                            )]
+                        )
+                    except Exception as e:
+                        print(f"\033[36m[ActionRouter]\033[0m Error respondiendo ocupado para FAST: {e}")
+                return
+
+            print(f"[LaneRouter] accept call={call_id} lane={lane_str}")
+            asyncio.create_task(self.run_fast_hermes(call_id, tool_name, prompt))
+        else: # SLOW_HERMES
+            if not self.can_accept_lane(TaskLane.SLOW_HERMES):
+                print(f"[LaneRouter] reject call={call_id} lane={lane_str} reason=slow_lane_busy_queued")
+                await self.queue_hermes_tool_call(call_id, tool_name, prompt)
+            else:
+                if not self.reserve_tool_call():
+                    print(f"[LaneRouter] reject call={call_id} lane={lane_str} reason=slow_lane_busy_queued")
+                    await self.queue_hermes_tool_call(call_id, tool_name, prompt)
+                else:
+                    print(f"[LaneRouter] accept call={call_id} lane={lane_str}")
+                    asyncio.create_task(self.run_hermes(call_id, tool_name, prompt, send_ack=True))
+
+    async def run_local_tool(
+        self,
+        tool_name: str,
+        args: dict,
+        session,
+        call_id: str,
+    ) -> None:
+        """Ejecuta una herramienta local de forma inmediata."""
+        if tool_name == "cancelar_tarea_hermes":
+            await self.cancel_active_tool_call(call_id, tool_name)
+        elif tool_name == "consultar_estado_tareas":
+            await self.send_task_status_tool_call(call_id, tool_name)
+        elif tool_name == "consultar_resumen_hoy":
+            await self.send_today_summary_tool_call(call_id, tool_name)
+        elif tool_name == "reproducir_musica_youtube":
+            cancion = args.get("cancion", "")
+            print(f"[ActionRouter] Reproduciendo en YouTube localmente: {cancion}")
+            try:
+                await session.send_tool_response(
+                    function_responses=[
+                        types.FunctionResponse(
+                            name="reproducir_musica_youtube",
+                            id=call_id,
+                            response={"result": f"Reproduciendo '{cancion}' en YouTube."}
+                        )
+                    ]
+                )
+            except Exception as e:
+                print(f"[ActionRouter] Error tool response música: {e}")
+
+            import subprocess
+            subprocess.Popen([sys.executable, _LOCAL_YOUTUBE_SCRIPT, cancion])
+        else:
+            print(f"[ActionRouter] Herramienta local desconocida rechazada: name={tool_name}, args={args}")
+            if session:
+                try:
+                    await session.send_tool_response(
+                        function_responses=[
+                            types.FunctionResponse(
+                                name=tool_name,
+                                id=call_id,
+                                response={"status": "rechazada", "mensaje": "No reconozco esa herramienta local."},
+                            )
+                        ]
+                    )
+                except Exception as e:
+                    print(f"\033[36m[ActionRouter]\033[0m Error respondiendo tool desconocida: {e}")
 
     async def _send_busy_tool_response(self, session, call_id: str, name: str):
         try:
@@ -922,17 +1329,3 @@ class ActionRouter:
             )
         except Exception as exc:
             print(f"[ActionRouter] Error respondiendo cancelacion de tarea: {exc}")
-
-    async def _inject_brain_failure(self, turn, reason: str):
-        if self.synapse.active_turn and self.synapse.active_turn.turn_id != turn.turn_id:
-            print(f"[ActionRouter] Fallo tardío descartado para turno {turn.turn_id}: {reason}")
-            return
-
-        failure_text = (
-            f"[Fallo de tarea interna]: No pude completar esa tarea ahora. Motivo técnico breve: {reason}. "
-            "Díselo al usuario de forma natural y breve, sin mencionar Hermes."
-        )
-        try:
-            await self._queue_and_deliver_text(turn, failure_text, kind="hermes_failure", priority=10)
-        except Exception as exc:
-            print(f"[ActionRouter] Error inyectando fallo de cerebro: {exc}")

@@ -55,12 +55,14 @@ if not exist "data" mkdir data
 if not exist "data\logs" mkdir data\logs
 
 echo [+] Modulos cargados y verificados.
-echo [+] Conectando a Gemini Live...
-echo [+] Presiona Ctrl+C en la ventana en cualquier momento para apagar a JARVIS.
-echo.
+echo [+] Levantando Backend FastAPI + Kernel en segundo plano...
 
-:: Lanzar cliente de voz CLI
-python -m src.main
+:: Lanzar backend en una ventana minimizada o en background
+start "JARVIS Backend" /Min cmd /c "call .venv\Scripts\activate.bat && python -m src.main"
+
+echo [+] Levantando Interfaz de Escritorio Tauri...
+cd apps\jarvis-desktop
+npm run tauri dev
 
 echo.
 echo JARVIS ha sido apagado.

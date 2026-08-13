@@ -204,17 +204,26 @@ class _RotatingProxy(BaseHTTPRequestHandler):
             self._client_disconnected(method, path)
 
 
+_active_proxy_port = None
+
 def start_proxy(keys: list[str], port: int = PROXY_PORT) -> int:
     """
     Inicia el proxy en un hilo daemon. Devuelve el puerto en uso.
     Prueba puertos sucesivos si el inicial está ocupado.
+    Reutiliza la instancia del proxy si ya está iniciada.
     """
+    global _active_proxy_port
     if not keys:
         raise ValueError("Se necesita al menos una API key en el pool")
 
     _RotatingProxy._keys = list(keys)
     _RotatingProxy._key_cycle = itertools.cycle(keys)
     _RotatingProxy._call_counter = 0
+
+    if _active_proxy_port is not None:
+        key_shorts = [f"...{k[-6:]}" for k in keys]
+        print(f"\033[33m[KeyRotator]\033[0m Pool de llaves actualizado en proxy activo (puerto {_active_proxy_port}, {len(keys)} clave(s): {key_shorts})")
+        return _active_proxy_port
 
     current_port = port
     max_attempts = 20
@@ -225,7 +234,7 @@ def start_proxy(keys: list[str], port: int = PROXY_PORT) -> int:
             server = HTTPServer(("127.0.0.1", current_port), _RotatingProxy)
             break
         except OSError as e:
-            print(f"[KeyRotator] Puerto {current_port} ocupado. Probando el siguiente...")
+            print(f"\033[33m[KeyRotator]\033[0m Puerto {current_port} ocupado. Probando el siguiente...")
             current_port += 1
 
     if not server:
@@ -234,7 +243,8 @@ def start_proxy(keys: list[str], port: int = PROXY_PORT) -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
+    _active_proxy_port = current_port
     key_shorts = [f"...{k[-6:]}" for k in keys]
-    print(f"[KeyRotator] Proxy iniciado en http://127.0.0.1:{current_port}")
-    print(f"[KeyRotator] Pool de {len(keys)} clave(s): {key_shorts}")
+    print(f"\033[33m[KeyRotator]\033[0m Proxy iniciado en http://127.0.0.1:{current_port}")
+    print(f"\033[33m[KeyRotator]\033[0m Pool de {len(keys)} clave(s): {key_shorts}")
     return current_port

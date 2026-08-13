@@ -13,11 +13,11 @@ def play_on_youtube(query: str):
         query_string = urllib.parse.urlencode({"search_query": query})
         url = "https://www.youtube.com/results?" + query_string
         req = urllib.request.Request(
-            url, 
+            url,
             headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         )
         html_content = urllib.request.urlopen(req).read().decode('utf-8', errors='ignore')
-        
+
         # Buscar videoId en el JSON de respuesta
         match = re.search(r'"videoId":"([a-zA-Z0-9_-]{11})"', html_content)
         if match:

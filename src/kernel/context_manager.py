@@ -174,7 +174,7 @@ class ContextManager:
         hermes_context = self._load_hermes_context()
         active_session_context = self._load_active_session_context()
         music_instruction = self._music_instruction()
-        
+
         system_instruction_text = (
             f"Eres {self.bot_name}, un asistente de voz inteligente.\n\n"
             "## IDENTIDAD, MEMORIA Y APRENDIZAJE:\n"
@@ -201,7 +201,10 @@ class ContextManager:
             "- Escribir o ejecutar código\n"
             "- Recordar conversaciones pasadas o preferencias del usuario\n"
             "- Tareas complejas de varios pasos\n"
-            "- Regla de delegacion: si usas 'ejecutar_hermes_core', NO respondas el contenido de esa tarea por tu cuenta; solo reconoce brevemente que lo vas a revisar y espera el resultado del cerebro principal\n"
+            "- Regla de delegacion: si vas a llamar 'ejecutar_hermes_core', primero di UNA frase corta de acuse de recibo "
+            "(por ejemplo: 'Déjame revisarlo', 'Dame un momento', 'Lo estoy procesando'). "
+            "Luego llama la herramienta y quédate inmediatamente en silencio. NO respondas ni especules sobre la tarea. "
+            "Una vez que la tarea termine, el sistema te inyectará el resultado final y tú se lo comunicarás al usuario de forma natural.\n"
 
             "- Cualquier cosa que requiera acceso al sistema o información actualizada\n\n"
 
@@ -211,7 +214,7 @@ class ContextManager:
             "Espera siempre a que el usuario hable primero y pida algo concreto.\n\n"
 
             "Si una tarea compleja ya está en curso, puedes seguir conversando con el usuario, "
-            "responder preguntas simples y usar herramientas rápidas que NO dependan de Hermes. "
+            "responder preguntas simples directamente o delegar consultas rápidas al carril rápido cuando corresponda. "
             "Una interrupción de voz NO significa cancelar la tarea compleja de fondo. "
             "Si el usuario pregunta por progreso, estado o cola de tareas, usa 'consultar_estado_tareas'. "
             "Si el usuario pregunta 'que tenemos hoy', 'que tengo hoy', agenda de hoy o pendientes de hoy, "
@@ -226,10 +229,10 @@ class ContextManager:
             "REGLA DE IDENTIDAD CRÍTICA: Tú eres UNA SOLA ENTIDAD. NUNCA menciones 'Hermes' ni herramientas. "
             "Di siempre 'Déjame revisarlo', 'Lo estoy procesando', 'Dame un momento', etc.\n"
         )
-        
+
         if hermes_context:
             system_instruction_text += (
-                "\n[DATOS INTERNOS DE MEMORIA E IDENTIDAD]:\n"
+                "\n[DATOS INTERNOS - NO VERBALIZAR]:\n"
                 "La siguiente información es tu memoria a largo plazo y preferencias del usuario. "
                 "Úsala de forma proactiva y natural en la conversación. Si el usuario te pregunta por su agenda, "
                 "lo que han hablado antes, o qué estás haciendo, responde usando estos datos sin mencionar archivos ni a 'Hermes'.\n"
@@ -301,7 +304,7 @@ class ContextManager:
         """Genera la configuracion Live sin historial conversacional crudo."""
         current_instruction = self.get_base_instruction()
         inject_recent_memory = False
-        
+
         if inject_recent_memory and self.short_term_memory:
             historial_reciente = "\n".join(self.short_term_memory)
             current_instruction += (

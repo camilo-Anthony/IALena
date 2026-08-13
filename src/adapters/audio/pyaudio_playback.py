@@ -35,16 +35,16 @@ class PyAudioPlayback(IAudioPlayback):
         def _callback(_in_data, frame_count, _time_info, _status):
             if not self._playing:
                 return (b"\x00" * (frame_count * 2), pyaudio.paComplete)
-            
+
             needed = frame_count * 2
-            
+
             # Transferir de la cola al buffer interno
             while not self._queue.empty():
                 try:
                     self._buffer.extend(self._queue.get_nowait())
                 except queue.Empty:
                     break
-            
+
             # Extraer exactamente la cantidad de bytes requerida
             if len(self._buffer) >= needed:
                 data = bytes(self._buffer[:needed])
@@ -53,7 +53,7 @@ class PyAudioPlayback(IAudioPlayback):
                 # Si falta audio, reproducimos lo que hay y rellenamos con silencio temporalmente
                 data = bytes(self._buffer) + b"\x00" * (needed - len(self._buffer))
                 self._buffer.clear()
-                
+
             return (data, pyaudio.paContinue)
 
         self._stream = self._pa.open(

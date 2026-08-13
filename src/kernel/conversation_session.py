@@ -65,7 +65,7 @@ class ConversationSession:
 
     def to_hermes_messages(self) -> list[dict]:
         messages: list[dict] = []
-        role_map = {"assistant": "assistant", "user": "user"}
+        role_map = {"assistant": "assistant", "user": "user", "system": "system"}
         for event in self.events:
             role = role_map.get(event.role, "user")
             content = event.text if event.role != "system" else f"[system event: {event.kind}] {event.text}"
@@ -127,7 +127,7 @@ class SessionMemoryConsolidator:
 
         transcript = session.transcript_text()
         if len(transcript.strip()) < self.min_chars:
-            print(f"[SessionMemory] Sesion {session.session_id} sin datos suficientes para consolidar.")
+            print(f"[SessionMemory] SessionMemory skipped_too_short session={session.session_id} len={len(transcript)}")
             return None
 
         await asyncio.sleep(self.defer_seconds)
@@ -225,10 +225,20 @@ class ConversationSessionManager:
     def _schedule_consolidation(self, session: ConversationSession) -> None:
         if not self.consolidator:
             return
+        if not session.events:
+            print(f"[SessionMemory] SessionMemory skipped_empty session={session.session_id}")
+            return
+
+        transcript = session.transcript_text()
+        if len(transcript.strip()) < self.consolidator.min_chars:
+            print(f"[SessionMemory] SessionMemory skipped_too_short session={session.session_id} len={len(transcript)}")
+            return
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+        print(f"[SessionMemory] SessionMemory review_started session={session.session_id}")
         task = loop.create_task(self.consolidator.consolidate(session))
         self._consolidation_tasks.add(task)
         task.add_done_callback(lambda completed: self._on_consolidation_done(session, completed))
@@ -238,18 +248,19 @@ class ConversationSessionManager:
         try:
             result = task.result()
         except asyncio.CancelledError:
-            print(f"[SessionMemory] Consolidacion cancelada: session={session.session_id}")
+            print(f"[SessionMemory] SessionMemory review_failed reason=cancelled session={session.session_id}")
             return
         except Exception as exc:
-            print(f"[SessionMemory] Consolidacion fallo: session={session.session_id}, error={exc}")
+            print(f"[SessionMemory] SessionMemory review_failed reason={exc} session={session.session_id}")
             return
 
         if result is None:
+            print(f"[SessionMemory] SessionMemory review_completed session={session.session_id}")
             return
         if result.success:
-            print(f"[SessionMemory] Consolidacion completada: session={session.session_id}")
+            print(f"[SessionMemory] SessionMemory review_completed session={session.session_id}")
         else:
             print(
-                f"[SessionMemory] Consolidacion fallo: "
-                f"session={session.session_id}, error={result.error or 'sin detalle'}"
+                f"[SessionMemory] SessionMemory review_failed reason={result.error or 'sin detalle'} "
+                f"session={session.session_id}"
             )

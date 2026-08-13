@@ -53,6 +53,7 @@ class Synapse:
     def __init__(self):
         self._listeners: Dict[str, List[Callable[..., Any]]] = {}
         self.active_turn: Optional[TurnRecord] = None
+        self.last_turn: Optional[TurnRecord] = None
         self._history_turns: List[TurnRecord] = []
         self.loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -67,7 +68,7 @@ class Synapse:
 
     def publish(self, event_type: str, *args, **kwargs):
         """
-        Publica un evento a los suscriptores. 
+        Publica un evento a los suscriptores.
         Si se invoca desde otro hilo (ej. callbacks de Hermes), enruta al event loop principal.
         """
         callbacks = self._listeners.get(event_type, [])
@@ -98,13 +99,13 @@ class Synapse:
         # la maneja ActionRouter; Synapse es puramente pasivo en cuanto a ejecución.
         turn_id = str(uuid.uuid4())
         turn = TurnRecord(turn_id, user_prompt)
-        
+
         self.active_turn = turn
         self._history_turns.append(turn)
-        
+
         if len(self._history_turns) > 50:
             self._history_turns.pop(0)
-            
+
         turn.history.append((TurnState.LISTENING.value, time.monotonic()))
         self.publish("turn_created", turn)
         return turn
@@ -112,23 +113,31 @@ class Synapse:
     def change_state(self, state: TurnState, turn_id: Optional[str] = None):
         """Cambia el estado de un turno y publica el evento."""
         target_turn = self.active_turn
-        
+
         if turn_id:
             if self.active_turn and self.active_turn.turn_id == turn_id:
                 target_turn = self.active_turn
             else:
                 target_turn = next((t for t in self._history_turns if t.turn_id == turn_id), None)
-                
+
         if not target_turn:
             return
-            
+
         old_state = target_turn.state
         if old_state == state:
             return
-            
+
         target_turn.state = state
         ts = time.monotonic()
         target_turn.history.append((state.value, ts))
-        
+
         if target_turn == self.active_turn:
             self.publish("turn_state_changed", target_turn, old_state, state)
+            if state in (TurnState.COMPLETED, TurnState.FAILED, TurnState.INTERRUPTED, TurnState.STALE):
+                self.last_turn = target_turn
+                # Para STALE, mantenemos active_turn hasta que la brain_task drene,
+                # para que has_unfinished_brain_task() funcione correctamente.
+                if state != TurnState.STALE or (
+                    target_turn.brain_task is None or target_turn.brain_task.done()
+                ):
+                    self.active_turn = None

@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  body, #root {
+    background-color: transparent;
+    color: #e0f4ff;
+    overflow: hidden;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+    width: 100vw;
+    height: 100vh;
+  }
+}

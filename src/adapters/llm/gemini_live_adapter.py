@@ -83,7 +83,7 @@ class GeminiLiveAdapter(IVoiceAssistant):
         self.activation_gate = activation_gate
         self.conversation_sessions = conversation_sessions
         self.cognitive_policy = cognitive_policy or CognitivePolicy()
-        
+
         self.client = genai.Client(
             api_key=GEMINI_API_KEY,
             http_options=types.HttpOptions(api_version="v1alpha"),
@@ -183,7 +183,29 @@ class GeminiLiveAdapter(IVoiceAssistant):
     def _is_explicit_music_request(self, song: str = "") -> bool:
         return self._policy().has_explicit_music_request(song)
 
-    def _evaluate_hermes_transcript_gate(self) -> ToolDecision:
+    @staticmethod
+    def _looks_like_internal_delivery_prompt(prompt: str) -> bool:
+        normalized = CognitivePolicy.normalize_for_intent(prompt)
+        if not normalized:
+            return False
+        internal_markers = (
+            "jarvis internal delivery",
+            "mensaje interno de delivery",
+            "resultado de la tarea solicitada",
+            "resultado rapido",
+            "fallo de tarea interna",
+            "no es una orden nueva del usuario",
+            "no usar herramientas",
+        )
+        return any(marker in normalized for marker in internal_markers)
+
+    def _evaluate_hermes_transcript_gate(self, prompt: str = "") -> ToolDecision:
+        if self._looks_like_internal_delivery_prompt(prompt):
+            return ToolDecision.reject(
+                "ignorado",
+                "Ignore una redelegacion generada por una entrega interna.",
+                "delivery_interno_no_es_orden",
+            )
         if not REQUIRE_NEW_TRANSCRIPT_FOR_HERMES:
             return ToolDecision.allow("transcript_gate_disabled")
         current_revision = getattr(self, "_hermes_speech_revision", 0)
@@ -238,16 +260,14 @@ class GeminiLiveAdapter(IVoiceAssistant):
         return False, ""
 
     def _claim_response_for_hermes(self, prompt: str) -> None:
-        flush = getattr(self.playback, "flush", None)
-        if callable(flush):
-            flush()
         print(
-            "[JARVIS] Turno delegado a Hermes; salida Live directa descartada "
+            "\033[95m[JARVIS]\033[0m Turno delegado a Hermes; salida Live directa descartada "
             f"(prompt_chars={len(prompt)})."
         )
+        print("[LiveAdapter] direct_output suppressed reason=delivery_claimed")
 
     async def _reject_tool_without_recent_voice(self, call_id: str, name: str):
-        print(f"[JARVIS] Tool call ignorada sin voz reciente: {name}")
+        print(f"\033[95m[JARVIS]\033[0m Tool call ignorada sin voz reciente: {name}")
         if not self.session:
             return
         try:
@@ -264,10 +284,10 @@ class GeminiLiveAdapter(IVoiceAssistant):
                 ]
             )
         except Exception as exc:
-            print(f"[JARVIS] Error respondiendo tool call sin voz reciente: {exc}")
+            print(f"\033[95m[JARVIS]\033[0m Error respondiendo tool call sin voz reciente: {exc}")
 
     async def _reject_tool_without_confirmed_intent(self, call_id: str, name: str, reason: str):
-        print(f"[JARVIS] Tool call ignorada por intencion no confirmada: {name} ({reason})")
+        print(f"\033[95m[JARVIS]\033[0m Tool call ignorada por intencion no confirmada: {name} ({reason})")
         if not self.session:
             return
         try:
@@ -284,10 +304,10 @@ class GeminiLiveAdapter(IVoiceAssistant):
                 ]
             )
         except Exception as exc:
-            print(f"[JARVIS] Error respondiendo tool call sin intencion confirmada: {exc}")
+            print(f"\033[95m[JARVIS]\033[0m Error respondiendo tool call sin intencion confirmada: {exc}")
 
     async def _reject_tool_by_policy(self, call_id: str, name: str, decision: ToolDecision):
-        print(f"[ToolGate] Tool call rechazada: {name} ({decision.reason})")
+        print(f"\033[92m[ToolGate]\033[0m Tool call rechazada: {name} ({decision.reason})")
         if not self.session:
             return
         try:
@@ -305,15 +325,15 @@ class GeminiLiveAdapter(IVoiceAssistant):
                 ]
             )
         except Exception as exc:
-            print(f"[ToolGate] Error respondiendo rechazo de tool call: {exc}")
+            print(f"\033[92m[ToolGate]\033[0m Error respondiendo rechazo de tool call: {exc}")
 
     # ── Conexión principal ───────────────────────────────────────────────
     async def connect(self):
         if not GEMINI_API_KEY:
-            print("[ERROR] Falta GEMINI_API_KEY / GOOGLE_API_KEY en .env")
+            print("\033[91m[ERROR] Falta GEMINI_API_KEY / GOOGLE_API_KEY en .env\033[0m")
             return
 
-        print(f"[JARVIS] Iniciando sistema Auto-Reconexión para {MODEL_LIVE}…")
+        print(f"\033[95m[JARVIS]\033[0m Iniciando sistema Auto-Reconexión para {MODEL_LIVE}…")
         try:
             self.is_running = True
             self.capture.start()
@@ -333,12 +353,16 @@ class GeminiLiveAdapter(IVoiceAssistant):
                             reset_recent_voice()
                         self._session_started_at = time.monotonic()
                         if self.activation_gate:
+                            # Primer inicio de sesión de la ejecución: activar de inmediato
+                            is_first_session = (self.session_epoch == 0)
                             self.session_epoch = self.activation_gate.start_live_session("live_connected")
+                            if is_first_session:
+                                self.activation_gate.mark_user_voice("initial_activation")
                         else:
                             self.session_epoch += 1
                         self._reconnect_output_suppressed_logged = False
-                        print("[JARVIS] ¡Conexión en vivo establecida! Escuchando…")
-                        
+                        print("\033[95m[JARVIS]\033[0m ¡Conexión en vivo establecida! Escuchando…")
+
                         t_send = asyncio.create_task(self._send_audio())
                         t_recv = asyncio.create_task(self._receive())
                         t_watchdog = asyncio.create_task(self._session_watchdog())
@@ -347,7 +371,7 @@ class GeminiLiveAdapter(IVoiceAssistant):
                             [t_send, t_recv, t_watchdog],
                             return_when=asyncio.FIRST_COMPLETED
                         )
-                        
+
                         # Limpiar tareas huérfanas
                         self.session = None
                         for task in pending:
@@ -370,12 +394,12 @@ class GeminiLiveAdapter(IVoiceAssistant):
                                     recycle_reason = "goaway"
                                 else:
                                     raise exc
-                        
+
                         if not self.is_running:
                             break
                         if recycle_reason == "refresh":
                             quota_backoff_seconds = LIVE_QUOTA_BACKOFF_SECONDS
-                            print("[JARVIS] Sesion reciclada preventivamente. Reconectando en silencio...")
+                            print("\033[95m[JARVIS]\033[0m Sesion reciclada preventivamente. Reconectando en silencio...")
                         elif recycle_reason == "quota":
                             await self._pause_after_quota_error(quota_backoff_seconds)
                             quota_backoff_seconds = min(
@@ -384,17 +408,17 @@ class GeminiLiveAdapter(IVoiceAssistant):
                             )
                         elif recycle_reason == "goaway":
                             quota_backoff_seconds = LIVE_QUOTA_BACKOFF_SECONDS
-                            print("[JARVIS] Sesion Live expiro; reciclando conexion...")
+                            print("\033[95m[JARVIS]\033[0m Sesion Live expiro; reciclando conexion...")
                         else:
                             quota_backoff_seconds = LIVE_QUOTA_BACKOFF_SECONDS
-                            print("[JARVIS] Sesion reciclada. Reconectando en silencio...")
+                            print("\033[95m[JARVIS]\033[0m Sesion reciclada. Reconectando en silencio...")
                         continue
                 except Exception as exc:
                     if not self.is_running:
                         break
                     if str(exc) == "Proactive_Refresh":
                         quota_backoff_seconds = LIVE_QUOTA_BACKOFF_SECONDS
-                        print("[JARVIS] Refresco preventivo exitoso.")
+                        print("\033[95m[JARVIS]\033[0m Refresco preventivo exitoso.")
                     elif self._is_live_quota_error(exc):
                         await self._pause_after_quota_error(quota_backoff_seconds)
                         quota_backoff_seconds = min(
@@ -403,15 +427,15 @@ class GeminiLiveAdapter(IVoiceAssistant):
                         )
                     elif self._is_session_recycle_error(exc):
                         quota_backoff_seconds = LIVE_QUOTA_BACKOFF_SECONDS
-                        print("[JARVIS] Sesion Live expiro; reconectando en 2s...")
+                        print("\033[95m[JARVIS]\033[0m Sesion Live expiro; reconectando en 2s...")
                         await asyncio.sleep(2)
                     else:
-                        print(f"[JARVIS] Caída de red detectada ({exc}). Reconectando en 2s...")
+                        print(f"\033[95m[JARVIS]\033[0m Caída de red detectada ({exc}). Reconectando en 2s...")
                         await asyncio.sleep(2)
-                    
+
                     reconnect_count += 1
         except Exception as exc:
-            print(f"[JARVIS] Error fatal de conexión: {exc}")
+            print(f"\033[95m[JARVIS]\033[0m Error fatal de conexión: {exc}")
         finally:
             self.is_running = False
             self._close_conversation_session("voice_adapter_stopped")
@@ -427,7 +451,6 @@ class GeminiLiveAdapter(IVoiceAssistant):
 
     async def _session_watchdog(self):
         """Evita el corte brusco de Google (15 min) refrescando la sesión en un momento de silencio."""
-        import time
         watchdog_epoch = self.session_epoch
         start_time = time.time()
         while self.is_running and self.session:
@@ -490,9 +513,11 @@ class GeminiLiveAdapter(IVoiceAssistant):
                             if suppress_model_turn:
                                 if suppress_reason == "post_reconnect" and not self._reconnect_output_suppressed_logged:
                                     print("[JARVIS] Salida Live ignorada durante gracia post-reconexion.")
+                                    print("[LiveAdapter] direct_output suppressed reason=post_reconnect")
                                     self._reconnect_output_suppressed_logged = True
                                 elif suppress_reason == "hermes_tool_call":
                                     print("[JARVIS] Salida Live directa ignorada: el turno fue delegado a Hermes.")
+                                    print("[LiveAdapter] direct_output suppressed reason=hermes_tool_call")
                             else:
                                 for part in sc.model_turn.parts:
                                     if part.inline_data:
@@ -520,85 +545,49 @@ class GeminiLiveAdapter(IVoiceAssistant):
                             if not decision.allowed:
                                 await self._reject_tool_by_policy(fn.id, fn.name, decision)
                                 continue
+
+                            # Validación adicional de transcripción para Hermes
                             if fn.name == "ejecutar_hermes_core":
                                 prompt = args.get("prompt", "")
-                                transcript_decision = self._evaluate_hermes_transcript_gate()
+                                transcript_decision = self._evaluate_hermes_transcript_gate(prompt)
                                 if not transcript_decision.allowed:
                                     await self._reject_tool_by_policy(fn.id, fn.name, transcript_decision)
                                     continue
-                                if not self.hermes_router:
-                                    print("[JARVIS] Error: hermes_router no está inicializado.")
-                                    continue
-                                if not self.hermes_router.reserve_tool_call():
-                                    queued = await self.hermes_router.queue_hermes_tool_call(fn.id, fn.name, prompt)
-                                    if queued:
-                                        print(f"[ToolGate] Tool call en cola: {fn.name} ({decision.reason})")
-                                        self._mark_hermes_transcript_consumed()
-                                        self._record_user_text(prompt, kind="hermes_tool_call_queued")
-                                        self._claim_response_for_hermes(prompt)
-                                    else:
-                                        await self.hermes_router.reject_busy_tool_call(fn.id, fn.name)
-                                    continue
-                                print(f"[ToolGate] Tool call aceptada: {fn.name} ({decision.reason})")
                                 self._mark_hermes_transcript_consumed()
                                 self._record_user_text(prompt, kind="hermes_tool_call")
                                 self._claim_response_for_hermes(prompt)
-                                asyncio.create_task(
-                                    self.hermes_router.run_hermes(fn.id, fn.name, prompt)
-                                )
+
                             elif fn.name == "cancelar_tarea_hermes":
-                                print(f"[ToolGate] Tool call aceptada: {fn.name} ({decision.reason})")
                                 motivo = args.get("motivo", "")
                                 self._record_user_text(
                                     motivo or "Cancelar tarea Hermes activa",
                                     kind="cancel_tool_call",
                                 )
-                                if self.hermes_router:
-                                    await self.hermes_router.cancel_active_tool_call(fn.id, fn.name)
-                                else:
-                                    print("[JARVIS] Error: hermes_router no está inicializado.")
                             elif fn.name == "consultar_estado_tareas":
-                                print(f"[ToolGate] Tool call aceptada: {fn.name} ({decision.reason})")
                                 self._record_user_text(
                                     "Consultar estado de tareas complejas",
                                     kind="task_status_tool_call",
                                 )
-                                if self.hermes_router:
-                                    await self.hermes_router.send_task_status_tool_call(fn.id, fn.name)
-                                else:
-                                    print("[JARVIS] Error: hermes_router no estÃ¡ inicializado.")
                             elif fn.name == "consultar_resumen_hoy":
-                                print(f"[ToolGate] Tool call aceptada: {fn.name} ({decision.reason})")
                                 self._record_user_text(
                                     "Consultar resumen local de hoy",
                                     kind="today_summary_tool_call",
                                 )
-                                if self.hermes_router:
-                                    await self.hermes_router.send_today_summary_tool_call(fn.id, fn.name)
-                                else:
-                                    print("[JARVIS] Error: hermes_router no estÃ¡ inicializado.")
                             elif fn.name == "reproducir_musica_youtube":
-                                print(f"[ToolGate] Tool call aceptada: {fn.name} ({decision.reason})")
                                 cancion = args.get("cancion", "")
                                 self._record_user_text(f"Reproducir en YouTube: {cancion}", kind="music_tool_call")
                                 print(f"[JARVIS] Reproduciendo en YouTube: {cancion}")
-                                # 1. Cerrar el ciclo de la tool call de inmediato
-                                try:
-                                    await self.session.send_tool_response(
-                                        function_responses=[
-                                            types.FunctionResponse(
-                                                name="reproducir_musica_youtube",
-                                                id=fn.id,
-                                                response={"result": f"Reproduciendo '{cancion}' en YouTube."}
-                                            )
-                                        ]
+
+                            print(f"[ToolGate] Tool call aceptada: {fn.name} ({decision.reason})")
+                            print(f"[LiveAdapter] delegated call={fn.id} tool={fn.name} suppress_live_output=true")
+                            if self.hermes_router:
+                                asyncio.create_task(
+                                    self.hermes_router.submit_tool_call(
+                                        fn.name, args, self.session, fn.id
                                     )
-                                except Exception as e:
-                                    print(f"[JARVIS] Error tool response música: {e}")
-                                # 2. Lanzar el script de YouTube en background
-                                import subprocess
-                                play_yt_path = os.path.join(os.path.dirname(__file__), "play_yt.py")
-                                subprocess.Popen([sys.executable, play_yt_path, cancion])
+                                )
+                            else:
+                                print("[JARVIS] Error: hermes_router no está inicializado.")
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -610,4 +599,3 @@ class GeminiLiveAdapter(IVoiceAssistant):
                 else:
                     print(f"[JARVIS] Error recibiendo: {exc}")
                 break
-
