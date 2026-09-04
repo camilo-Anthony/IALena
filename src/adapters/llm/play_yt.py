@@ -24,13 +24,12 @@ def play_on_youtube(query: str):
             video_id = match.group(1)
             video_url = "https://www.youtube.com/watch?v=" + video_id
             print(f"Abriendo {video_url} ...")
-            # Cerrar pestañas anteriores antes de abrir la nueva
-            import subprocess
-            subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/FI', 'WINDOWTITLE eq YouTube*'], capture_output=True)
+            # Usar webbrowser.open con autora de nueva ventana en 0 (pestaña existente)
+            # Nota: el comportamiento depende del navegador por defecto.
+            # Se ha eliminado el taskkill forzado que cerraba el navegador.
             webbrowser.open(video_url, new=0)
         else:
             print("No se encontraron videos específicos. Abriendo página de resultados.")
-            subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/FI', 'WINDOWTITLE eq YouTube*'], capture_output=True)
             webbrowser.open(url, new=0) # Fallback a la pagina de busqueda
     except Exception as e:
         print(f"Error al buscar en YouTube: {e}")

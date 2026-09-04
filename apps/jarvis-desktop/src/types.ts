@@ -16,7 +16,11 @@ export interface TaskItem {
   lane: string;
   prompt: string;
   state: string;
+  result?: string;
+  error?: string;
   created_at?: number;
+  completed_at?: number;
+  duration?: number;
 }
 
 export interface TasksPayload {
@@ -54,6 +58,34 @@ export interface CapabilitiesSnapshot {
   timestamp: number;
 }
 
+export interface WakeWordDetectorMetrics {
+  ready?: boolean;
+  models?: string[];
+  threshold?: number;
+  consecutive_frames_required?: number;
+  cooldown_seconds?: number;
+  total_detections?: number;
+  total_inferences?: number;
+  avg_inference_ms?: number;
+  avg_score?: number;
+  last_detected_model?: string;
+  last_detected_score?: number;
+  last_detected_at?: number;
+}
+
+export interface WakeWordStatus {
+  pipeline_running?: boolean;
+  wake_word_enabled?: boolean;
+  pre_roll_ms?: number;
+  total_chunks_processed?: number;
+  pre_rolls_injected?: number;
+  ring_buffer_bytes?: number;
+  last_wake_timestamp?: number;
+  detector?: WakeWordDetectorMetrics;
+  enabled?: boolean;
+  ready?: boolean;
+}
+
 export interface StatusPayload {
   orb_state: OrbState;
   uptime_seconds: number;
@@ -65,6 +97,7 @@ export interface StatusPayload {
   tasks?: TaskStatusPayload;
   key_rotator?: KeyRotatorStatus;
   delivery_queue?: DeliveryQueueStatus;
+  wake_word?: WakeWordStatus;
 }
 
 export interface ConfigPayload {
@@ -84,6 +117,12 @@ export interface ConfigPayload {
   LIVE_VAD_END_SENSITIVITY?: string;
   ENABLE_MUSIC_TOOL?: string;
   MIC_NOISE_GATE_ENABLED?: string;
+  WAKE_WORD_ENABLED?: string;
+  WAKE_WORD_MODEL?: string;
+  WAKE_WORD_THRESHOLD?: string;
+  WAKE_WORD_CONSECUTIVE_FRAMES?: string;
+  WAKE_WORD_PRE_ROLL_MS?: string;
+  WAKE_WORD_COOLDOWN_SECONDS?: string;
   HERMES_PLATFORM?: string;
   HERMES_ENABLED_TOOLSETS?: string;
   HERMES_DISABLED_TOOLSETS?: string;

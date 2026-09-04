@@ -41,7 +41,7 @@ async def broadcast(event_type: str, data: dict[str, Any]) -> None:
         "type": event_type,
         "ts": time.time(),
         "data": data,
-    })
+    }, default=str)
     dead: list[WebSocket] = []
     async with _clients_lock:
         for ws in list(_clients):
@@ -55,7 +55,7 @@ async def broadcast(event_type: str, data: dict[str, Any]) -> None:
 
 # ── Polling loop — emite eventos cuando el estado cambia ──────────────────
 
-async def start_event_loop(poll_interval: float = 0.5) -> None:
+async def start_event_loop(poll_interval: float = 0.05) -> None:
     """
     Loop background que detecta cambios de estado y los emite via WebSocket.
     Arranca como tarea asyncio junto al servidor FastAPI.

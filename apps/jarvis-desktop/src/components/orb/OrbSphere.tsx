@@ -128,21 +128,21 @@ export function OrbSphere({ stateName }: OrbSphereProps) {
   const targets = useMemo(() => {
     switch (stateName) {
       case "listening":
-        return { color: "#00ff88", excitement: 0.5, speed: 1.6, baseBpm: 75 };
+        return { color: "#FFB000", excitement: 0.5, speed: 1.6, baseBpm: 75 };
       case "speaking":
-        return { color: "#00f5ff", excitement: 0.7, speed: 2.2, baseBpm: 95 };
+        return { color: "#00F5FF", excitement: 0.7, speed: 2.2, baseBpm: 95 };
       case "thinking_fast":
-        return { color: "#ffd700", excitement: 0.9, speed: 3.5, baseBpm: 110 };
+        return { color: "#A855F7", excitement: 0.9, speed: 3.5, baseBpm: 110 };
       case "working_slow":
-        return { color: "#ff6b35", excitement: 0.8, speed: 2.8, baseBpm: 90 };
+        return { color: "#FF2A55", excitement: 0.8, speed: 2.8, baseBpm: 90 };
       case "reconnecting":
       case "confirmation_pending":
-        return { color: "#7c3aed", excitement: 0.3, speed: 1.2, baseBpm: 65 };
+        return { color: "#9333EA", excitement: 0.3, speed: 1.2, baseBpm: 65 };
       case "error":
-        return { color: "#ff3366", excitement: 1.0, speed: 5.0, baseBpm: 120 };
+        return { color: "#FF2A55", excitement: 1.0, speed: 5.0, baseBpm: 120 };
       case "dormant":
       default:
-        return { color: "#0055dd", excitement: 0.0, speed: 0.4, baseBpm: 14 }; // 14 ciclos de respiración
+        return { color: "#0077FF", excitement: 0.0, speed: 0.4, baseBpm: 14 }; // 14 ciclos de respiración
     }
   }, [stateName]);
 

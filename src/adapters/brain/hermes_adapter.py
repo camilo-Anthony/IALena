@@ -79,9 +79,10 @@ def _read_runtime_config() -> Dict[str, Any]:
     # Si HERMES_ENABLED_TOOLSETS no está definido en el env, usar directamente los defaults de JARVIS
     if enabled_toolsets is None:
         enabled_toolsets = [
-            "web", "file", "terminal", "browser", "skills", "todo",
-            "memory", "session_search", "code_execution", "delegation",
-            "cronjob", "vision", "image_gen", "tts"
+            "web", "file", "terminal", "browser", "browser-cdp", "skills", "todo",
+            "kanban", "project", "clarify", "memory", "session_search",
+            "code_execution", "delegation", "cronjob", "vision", "image_gen",
+            "tts", "computer_use", "video", "video_gen"
         ]
     if disabled_toolsets is None:
         disabled_toolsets = [
@@ -132,6 +133,7 @@ class HermesAdapter(IAgentBrain):
     def __init__(self, api_keys: list, model_brain: str, mode: str = "slow"):
         self.hermes_agent = None
         self.mode = mode  # "slow" | "fast"
+        self.model_brain = model_brain
 
         # Diccionario para enrutar eventos por ID de hilo
         self._thread_listeners: Dict[int, Callable] = {}
@@ -191,13 +193,18 @@ class HermesAdapter(IAgentBrain):
             skip_context_files=runtime_config["skip_context_files"],
             skip_memory=runtime_config["skip_memory"],
             pass_session_id=runtime_config["pass_session_id"],
+            checkpoints_enabled=True,
             tool_start_callback=self._on_tool_start,
             tool_complete_callback=self._on_tool_complete,
             status_callback=self._on_status,
         )
+        skill_nudge = int(os.getenv("HERMES_SKILL_NUDGE_INTERVAL", "0"))
         if hasattr(self.hermes_agent, "_skill_nudge_interval"):
-            setattr(self.hermes_agent, "_skill_nudge_interval", 0)
-        print("\033[94m[HermesAdapter][SLOW]\033[0m Hermes Core listo (rotación activa).")
+            setattr(self.hermes_agent, "_skill_nudge_interval", skill_nudge)
+        print(f"\033[94m[HermesAdapter][SLOW]\033[0m Hermes Core listo (rotación activa, checkpoints=on, skill_nudge={skill_nudge}).")
+
+        # Inicializar servidores MCP configurados
+        self._init_mcp_servers()
 
         tools_list = self._log_available_tools()
         capability_registry.update_capabilities(
@@ -222,10 +229,28 @@ class HermesAdapter(IAgentBrain):
         print(f"\033[94m[HermesAdapter][SLOW]\033[0m SLOW detected_tools={tools_str}")
         print(f"\033[94m[HermesAdapter][SLOW]\033[0m SLOW capabilities={caps_str}")
 
+    def _init_mcp_servers(self) -> None:
+        """Descubre e inicializa servidores MCP configurados en ~/.hermes/config.yaml."""
+        try:
+            from tools.mcp_tool import register_mcp_servers
+            import yaml
+            cfg_path = os.path.expanduser("~/.hermes/config.yaml")
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                servers = cfg.get("mcp_servers", {})
+                if servers:
+                    print(f"\033[36m[HermesAdapter][{self.mode.upper()}]\033[0m Inicializando {len(servers)} servidor(es) MCP: {list(servers.keys())}…")
+                    registered = register_mcp_servers(servers)
+                    print(f"\033[36m[HermesAdapter][{self.mode.upper()}]\033[0m Herramientas MCP registradas: {len(registered)}")
+        except Exception as exc:
+            print(f"[HermesAdapter] Aviso MCP: {exc}")
+
     def _init_fast_mode(self, proxy_base_url: str, model_brain: str) -> None:
         """Inicialización restringida para el carril FAST."""
         # El carril FAST usa un modelo configurable (puede ser más ligero)
         fast_model = os.getenv("MODEL_BRAIN_FAST", model_brain)
+        self.model_brain = fast_model
         print(f"\033[96m[HermesAdapter][FAST]\033[0m Inicializando con modelo={fast_model}…")
         # Toolsets: solo los seguros, siempre deshabilitamos los peligrosos
         enabled = _FAST_SAFE_TOOLSETS
@@ -396,9 +421,20 @@ class HermesAdapter(IAgentBrain):
                     started_at=started_at, finished_at=time.time()
                 )
         else:
-            # SLOW: serializado con lock por event loop
+            # SLOW: serializado con lock por event loop y timeout de seguridad ampliado
+            slow_timeout = float(os.getenv("HERMES_SLOW_TIMEOUT_SECONDS", "360.0"))
             async with self._get_lock():
-                return await asyncio.to_thread(_execute_sync)
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.to_thread(_execute_sync),
+                        timeout=slow_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    return BrainResult(
+                        "", success=False,
+                        error=f"Timeout SLOW tras {slow_timeout}s",
+                        started_at=started_at, finished_at=time.time()
+                    )
 
     def is_available(self) -> bool:
         """Retorna True si el agente se inicializó correctamente."""

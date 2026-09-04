@@ -56,9 +56,10 @@ if not exist "data\logs" mkdir data\logs
 
 echo [+] Modulos cargados y verificados.
 echo [+] Levantando Backend FastAPI + Kernel en segundo plano...
-
-:: Lanzar backend en una ventana minimizada o en background
 start "JARVIS Backend" /Min cmd /c "call .venv\Scripts\activate.bat && python -m src.main"
+
+echo [+] Levantando Hermes Native Renderer en segundo plano...
+start "Hermes UI" /Min cmd /c "cd Hermes-Agent\apps\desktop && npm run dev:renderer"
 
 echo [+] Levantando Interfaz de Escritorio Tauri...
 cd apps\jarvis-desktop

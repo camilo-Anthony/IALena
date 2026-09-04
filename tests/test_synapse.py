@@ -450,6 +450,16 @@ class TestSynapseAndRouter(unittest.IsolatedAsyncioTestCase):
         response = session_mock.send_tool_response.call_args.kwargs["function_responses"][0].response
         self.assertEqual(response["status"], "cancelada_pendiente")
 
+    async def test_cancel_tool_call_when_no_active_work_and_no_pending_task(self):
+        session_mock = AsyncMock()
+        self.action_router.get_session = lambda: session_mock
+
+        await self.action_router.cancel_active_tool_call("cancel-none", "cancelar_tarea_hermes")
+
+        session_mock.send_tool_response.assert_called_once()
+        response = session_mock.send_tool_response.call_args.kwargs["function_responses"][0].response
+        self.assertEqual(response["status"], "no_active_task")
+
     async def test_reservation_blocks_second_tool_call_before_turn_exists(self):
         session_mock = AsyncMock()
         self.action_router.get_session = lambda: session_mock
@@ -883,17 +893,18 @@ class TestSynapseAndRouter(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.reason, "delegacion_hermes")
 
     def test_cognitive_policy_allows_hermes_delegation_for_simple_greeting_by_default(self):
-        policy = CognitivePolicy()
-        policy.record_user_utterance("hola")
+        with patch.dict(os.environ, {"STRICT_HERMES_INTENT_GATE": "0"}):
+            policy = CognitivePolicy()
+            policy.record_user_utterance("hola")
 
-        decision = policy.evaluate_tool_call(
-            "ejecutar_hermes_core",
-            {"prompt": "buscar informacion compleja que el usuario no pidio"},
-            has_recent_voice=True,
-        )
+            decision = policy.evaluate_tool_call(
+                "ejecutar_hermes_core",
+                {"prompt": "buscar informacion compleja que el usuario no pidio"},
+                has_recent_voice=True,
+            )
 
-        self.assertTrue(decision.allowed)
-        self.assertEqual(decision.reason, "delegacion_hermes")
+            self.assertTrue(decision.allowed)
+            self.assertEqual(decision.reason, "delegacion_hermes")
 
     def test_cognitive_policy_strict_hermes_gate_can_reject_simple_greeting(self):
         with patch.dict(os.environ, {"STRICT_HERMES_INTENT_GATE": "1"}):
@@ -1848,6 +1859,22 @@ class TestSynapseAndRouter(unittest.IsolatedAsyncioTestCase):
         from src.kernel.task_lane import classify_tool_call, TaskCapability
         decision = classify_tool_call("ejecutar_hermes_core", {"prompt": "programa una tarea para cada lunes"})
         self.assertIn(TaskCapability.CRONJOB, decision.required_capabilities)
+
+    async def test_lane_decision_mcp_with_and_without_capability(self):
+        from src.kernel.task_lane import classify_tool_call, TaskCapability
+        from src.kernel.capability_registry import capability_registry
+
+        # When MCP is not active in capability_registry
+        capability_registry.update_capabilities("slow", ["file", "terminal"], ["read_file", "terminal"])
+        decision = classify_tool_call("ejecutar_hermes_core", {"prompt": "usa la herramienta mcp para consultar"})
+        self.assertNotIn(TaskCapability.MCP, decision.required_capabilities)
+        self.assertIn(TaskCapability.TERMINAL, decision.required_capabilities)
+
+        # When MCP is active in capability_registry
+        capability_registry.update_capabilities("slow", ["mcp-github"], ["mcp_create_issue"])
+        decision = classify_tool_call("ejecutar_hermes_core", {"prompt": "usa la herramienta mcp para consultar"})
+        self.assertIn(TaskCapability.MCP, decision.required_capabilities)
+
 
     async def test_plain_yes_does_not_confirm_high_risk(self):
         session_mock = AsyncMock()

@@ -61,7 +61,9 @@ def main():
     # 1. Configuración Básica
     INPUT_RATE  = 16_000
     OUTPUT_RATE = 24_000
-    MODEL_BRAIN = os.getenv("MODEL_BRAIN", "gemini-3.1-flash-lite")
+    MODEL_BRAIN_DEFAULT = os.getenv("MODEL_BRAIN", "gemini-2.5-pro")
+    MODEL_BRAIN_SLOW = os.getenv("MODEL_BRAIN_SLOW", MODEL_BRAIN_DEFAULT)
+    MODEL_BRAIN_FAST = os.getenv("MODEL_BRAIN_FAST", "gemini-3.1-flash-lite")
 
     bot_name = os.getenv("ASSISTANT_NAME", "JARVIS")
     user_name = os.getenv("USER_NAME", "Señor")
@@ -74,8 +76,8 @@ def main():
     # 2. Instanciación de Adaptadores (Capa de Infraestructura)
     mic = PyAudioCapture(rate=INPUT_RATE)
     speaker = PyAudioPlayback(rate=OUTPUT_RATE)
-    brain = HermesAdapter(api_keys=hermes_keys, model_brain=MODEL_BRAIN, mode="slow")
-    brain_fast = HermesAdapter(api_keys=hermes_keys, model_brain=MODEL_BRAIN, mode="fast")
+    brain = HermesAdapter(api_keys=hermes_keys, model_brain=MODEL_BRAIN_SLOW, mode="slow")
+    brain_fast = HermesAdapter(api_keys=hermes_keys, model_brain=MODEL_BRAIN_FAST, mode="fast")
 
     # 3. Instanciación del Gestor de Contexto (Capa de Kernel)
     context_mgr = ContextManager(bot_name, user_name, voice_name, get_hermes_home)

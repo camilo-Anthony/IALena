@@ -7,11 +7,12 @@ export function OrbView() {
   const orbState = useJarvisStore((s) => s.orbState);
 
   return (
-    <div className="relative w-full h-full bg-transparent flex items-center justify-center pointer-events-none">
-      {/* Three.js Orb Canvas en pantalla completa */}
-      <div className="absolute inset-0 w-full h-full z-0">
-        <OrbScene state={orbState} />
-      </div>
+    <div className="fixed inset-0 w-screen h-screen bg-transparent overflow-hidden select-none pointer-events-none">
+      {/* Canvas Three.js en Pantalla Completa: 100% Transparente */}
+      <OrbScene state={orbState} />
+
+      {/* Capa de HUD cuántico e interactivo */}
+      <OrbHUD state={orbState} />
     </div>
   );
 }

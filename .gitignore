@@ -63,3 +63,12 @@ task_ledger.json
 trajectory_samples.jsonl
 *.pptx
 *.png
+
+# Node
+node_modules/
+
+# Binary & Large files (>100MB / 3D scratch)
+*.npy
+*.blend
+*.blend1
+*.pdf

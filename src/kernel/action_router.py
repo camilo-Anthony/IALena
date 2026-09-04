@@ -22,6 +22,7 @@ from src.kernel.synapse import Synapse, TurnState
 from src.kernel.task_lane import TaskLane, RiskLevel, LaneDecision, classify_tool_call
 from src.kernel.delivery_queue import DeliveryQueue, DeliveryItem
 from src.kernel.capability_registry import capability_registry, TaskCapability
+from src.adapters.audio.local_tts import local_tts as _default_local_tts
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 _LOCAL_YOUTUBE_SCRIPT = os.path.join(_PROJECT_ROOT, "src", "adapters", "llm", "play_yt.py")
@@ -78,6 +79,7 @@ class ActionRouter:
         conversation_sessions=None,
         brain_fast: IAgentBrain | None = None,
         delivery_queue: DeliveryQueue | None = None,
+        local_tts=None,
     ):
         self.brain = brain_adapter
         self.brain_fast = brain_fast
@@ -88,6 +90,7 @@ class ActionRouter:
         self.activation_gate = activation_gate
         self.task_ledger = task_ledger
         self.conversation_sessions = conversation_sessions
+        self.local_tts = local_tts or _default_local_tts
         self._tool_call_reserved = False
         self._queued_task_runner = None
         self.pending_confirmation = None
@@ -95,10 +98,10 @@ class ActionRouter:
         self._fast_max_parallel = int(os.getenv("FAST_BRAIN_MAX_PARALLEL", "3"))
         self._fast_tasks_running = 0
 
-        self._delivery_idle_seconds = self._read_float_env("RESULT_DELIVERY_IDLE_SECONDS", 1.0)
-        self._delivery_poll_seconds = self._read_float_env("RESULT_DELIVERY_POLL_SECONDS", 0.2)
-        self._delivery_recent_voice_seconds = self._read_float_env("RESULT_DELIVERY_RECENT_VOICE_SECONDS", 1.5)
-        self._delivery_max_wait_seconds = self._read_float_env("RESULT_DELIVERY_MAX_WAIT_SECONDS", 12.0)
+        self._delivery_idle_seconds = self._read_float_env("RESULT_DELIVERY_IDLE_SECONDS", 0.3)
+        self._delivery_poll_seconds = self._read_float_env("RESULT_DELIVERY_POLL_SECONDS", 0.05)
+        self._delivery_recent_voice_seconds = self._read_float_env("RESULT_DELIVERY_RECENT_VOICE_SECONDS", 0.8)
+        self._delivery_max_wait_seconds = self._read_float_env("RESULT_DELIVERY_MAX_WAIT_SECONDS", 8.0)
         self._delivery_log_seconds = self._read_float_env("RESULT_DELIVERY_LOG_SECONDS", 5.0)
 
         self.delivery_queue = delivery_queue or DeliveryQueue(
@@ -179,9 +182,8 @@ class ActionRouter:
         """
         Ejecuta una tarea de carril rápido de forma asíncrona.
         """
-        has_fast_brain = bool(self.brain_fast and self.brain_fast.is_available())
-
-        if not has_fast_brain:
+        brain = self.brain_fast
+        if brain is None or not brain.is_available():
             # Re-evaluar si la tarea amerita SLOW
             decision = classify_tool_call(tool_name, {"prompt": prompt})
             if decision.lane == TaskLane.SLOW_HERMES:
@@ -207,26 +209,24 @@ class ActionRouter:
                     pass
             return
 
-        brain = self.brain_fast
         lane_tag = "\033[96m[FAST]\033[0m"
 
-        if brain is self.brain_fast:
-            if self._fast_tasks_running >= self._fast_max_parallel:
-                print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Límite de paralelas alcanzado ({self._fast_max_parallel}), rechazando.")
-                session = self.get_session()
-                if session:
-                    try:
-                        await session.send_tool_response(
-                            function_responses=[types.FunctionResponse(
-                                id=call_id,
-                                name=tool_name,
-                                response={"status": "rechazada", "mensaje": "Demasiadas tareas rápidas en paralelo."},
-                            )]
-                        )
-                    except Exception:
-                        pass
-                return
-            self._fast_tasks_running += 1
+        if self._fast_tasks_running >= self._fast_max_parallel:
+            print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Límite de paralelas alcanzado ({self._fast_max_parallel}), rechazando.")
+            session = self.get_session()
+            if session:
+                try:
+                    await session.send_tool_response(
+                        function_responses=[types.FunctionResponse(
+                            id=call_id,
+                            name=tool_name,
+                            response={"status": "rechazada", "mensaje": "Demasiadas tareas rápidas en paralelo."},
+                        )]
+                    )
+                except Exception:
+                    pass
+            return
+        self._fast_tasks_running += 1
 
         ledger_task = None
         if self.task_ledger:
@@ -260,8 +260,7 @@ class ActionRouter:
         except Exception as exc:
             result = BrainResult("", success=False, error=str(exc))
         finally:
-            if brain is self.brain_fast:
-                self._fast_tasks_running = max(0, self._fast_tasks_running - 1)
+            self._fast_tasks_running = max(0, self._fast_tasks_running - 1)
 
         if self.task_ledger and ledger_task:
             if result.success:
@@ -304,7 +303,16 @@ class ActionRouter:
 
             session = self.get_session()
             if not session:
-                print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Sin sesión para entregar resultado FAST.")
+                print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Sin sesión Live activa. Entregando resultado FAST vía TTS local...")
+                self.delivery_queue.mark_delivering(item)
+                if self.activation_gate:
+                    self.activation_gate.begin_delivery(wake_request)
+                if self.local_tts:
+                    await self.local_tts.speak(result.text)
+                self.delivery_queue.mark_delivered(item)
+                if self.activation_gate:
+                    self.activation_gate.finish_delivery()
+                print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Resultado entregado localmente vía TTS.")
                 return
 
             self.delivery_queue.mark_delivering(item)
@@ -313,6 +321,8 @@ class ActionRouter:
 
             await self._send_client_text(session, item.text)
             self.delivery_queue.mark_delivered(item)
+            if self.activation_gate:
+                self.activation_gate.finish_delivery()
             print(f"\033[36m[ActionRouter]\033[0m{lane_tag} Resultado entregado.")
         except Exception as e:
             print(f"[ActionRouter]{lane_tag} Error entregando resultado FAST: {e}")
@@ -385,6 +395,55 @@ class ActionRouter:
                 send_ack=False,
             )
         )
+
+    async def submit_external_prompt(self, prompt: str, source: str = "external") -> str:
+        """
+        Ejecuta una consulta recibida desde un canal externo (como Telegram)
+        usando el carril de Hermes más adecuado.
+        """
+        prompt = (prompt or "").strip()
+        if not prompt:
+            return "No se recibió ninguna instrucción."
+
+        from src.kernel.task_lane import classify_tool_call, TaskLane
+
+        decision = classify_tool_call("ejecutar_hermes_core", {"prompt": prompt})
+        lane = decision.lane
+
+        print(f"\033[35m[ActionRouter]\033[0m Solicitud externa ({source}): '{prompt[:60]}…' -> Carril {lane.value}")
+
+        # Registrar en la sesión de conversación
+        if self.conversation_sessions:
+            self.conversation_sessions.record_user(prompt, kind=f"{source}_prompt")
+
+        if lane == TaskLane.FAST_HERMES and self.brain_fast:
+            brain_to_use = self.brain_fast
+            lane_name = "FAST"
+        else:
+            brain_to_use = self.brain
+            lane_name = "SLOW"
+
+        if not brain_to_use or not brain_to_use.is_available():
+            return "⚠️ El cerebro de JARVIS (Hermes) no está disponible en este momento."
+
+        model_name = getattr(brain_to_use, "model_brain", getattr(brain_to_use, "model", "default"))
+        print(f"\033[35m[ActionRouter]\033[0m Ejecutando en carril {lane_name} ({model_name})…")
+
+        try:
+            result = await brain_to_use.run_task(prompt)
+            if not result.success:
+                return f"⚠️ Error en Hermes: {result.error}"
+
+            reply_text = result.text or "Tarea completada sin salida textual."
+
+            if self.conversation_sessions:
+                self.conversation_sessions.record_bot(reply_text, kind=f"{source}_result")
+
+            return reply_text
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            return f"❌ Error ejecutando la solicitud externa: {exc}"
 
     def task_status_payload(self) -> dict:
         if self.pending_confirmation:
@@ -560,6 +619,139 @@ class ActionRouter:
         except Exception as exc:
             print(f"[ActionRouter] Error respondiendo tool call de estado de tareas: {exc}")
 
+    async def save_user_memory_tool_call(self, call_id: str, name: str, args: dict, session) -> None:
+        contenido = str((args or {}).get("contenido") or (args or {}).get("texto") or "").strip()
+        tipo = str((args or {}).get("tipo", "preferencia_personal")).strip()
+        if not contenido:
+            if session:
+                try:
+                    await session.send_tool_response(
+                        function_responses=[
+                            types.FunctionResponse(
+                                id=call_id,
+                                name=name,
+                                response={"status": "error", "mensaje": "Contenido de memoria vacío."},
+                            )
+                        ]
+                    )
+                except Exception:
+                    pass
+            return
+
+        print(f"\033[92m[Memoria Persistente]\033[0m Guardando aprendizaje en USER.md: {contenido} (tipo={tipo})")
+        try:
+            from hermes_constants import get_hermes_home
+            home = get_hermes_home()
+        except Exception:
+            home = os.path.expanduser("~/.hermes")
+
+        memories_dir = os.path.join(str(home), "memories")
+        os.makedirs(memories_dir, exist_ok=True)
+        user_md_path = os.path.join(memories_dir, "USER.md")
+
+        # Leer archivo existente para no duplicar
+        existing_text = ""
+        if os.path.exists(user_md_path):
+            try:
+                with open(user_md_path, "r", encoding="utf-8") as f:
+                    existing_text = f.read()
+            except Exception as read_exc:
+                print(f"[ActionRouter] Error leyendo USER.md: {read_exc}")
+
+        entry = f"- [{tipo}] {contenido}"
+        if entry not in existing_text and contenido not in existing_text:
+            try:
+                with open(user_md_path, "a", encoding="utf-8") as f:
+                    if existing_text and not existing_text.endswith("\n"):
+                        f.write("\n")
+                    f.write(f"\n§\n{entry}\n")
+            except Exception as write_exc:
+                print(f"[ActionRouter] Error escribiendo en USER.md: {write_exc}")
+
+        # Notificar a Synapse
+        if self.synapse:
+            try:
+                self.synapse.emit("memory_updated", {"type": "user", "entry": entry})
+            except Exception:
+                pass
+
+        if session:
+            try:
+                await session.send_tool_response(
+                    function_responses=[
+                        types.FunctionResponse(
+                            id=call_id,
+                            name=name,
+                            response={
+                                "status": "guardado",
+                                "mensaje": f"Aprendido y recordado permanentemente: '{contenido}'. Confirma verbalmente al usuario con elegancia.",
+                            },
+                        )
+                    ]
+                )
+            except Exception as exc:
+                print(f"[ActionRouter] Error enviando respuesta de memoria: {exc}")
+
+    async def _handle_screen_capture(self, call_id: str, name: str, args: dict, session):
+        """Captura la pantalla del usuario en Windows y genera análisis visual multimodal."""
+        from src.adapters.system.desktop_vision import capture_screenshot, analyze_screenshot, save_screenshot
+
+        active_window_only = bool(args.get("solo_ventana_activa", False))
+        consulta = str(args.get("consulta", "")).strip()
+        print(f"[ActionRouter] Capturando pantalla (solo_ventana_activa={active_window_only}, consulta='{consulta}')…")
+
+        capture = await asyncio.to_thread(capture_screenshot, active_window_only=active_window_only)
+
+        if capture.get("error"):
+            err_msg = capture["error"]
+            print(f"[ActionRouter] Error capturando pantalla: {err_msg}")
+            if session:
+                try:
+                    await session.send_tool_response(
+                        function_responses=[
+                            types.FunctionResponse(
+                                id=call_id,
+                                name=name,
+                                response={"status": "error", "mensaje": f"No se pudo capturar la pantalla: {err_msg}"},
+                            )
+                        ]
+                    )
+                except Exception as exc:
+                    print(f"[ActionRouter] Error enviando respuesta error pantalla: {exc}")
+            return
+
+        # Guardar en disco para referencia o uso de Hermes
+        saved_path = save_screenshot(capture)
+        print(f"[ActionRouter] Pantalla capturada ({capture['width']}x{capture['height']}px, '{capture['window_title']}'). Guardada en {saved_path}")
+
+        # Análisis visual con Gemini multimodal
+        analysis = await analyze_screenshot(capture, prompt=consulta)
+        print(f"[ActionRouter] Análisis visual completado: {analysis[:120]}…")
+
+        if session:
+            try:
+                await session.send_tool_response(
+                    function_responses=[
+                        types.FunctionResponse(
+                            id=call_id,
+                            name=name,
+                            response={
+                                "status": "captura_analizada",
+                                "ventana_activa": capture.get("window_title", "Escritorio"),
+                                "observacion_visual": analysis,
+                                "ruta_archivo": saved_path,
+                                "instruccion": (
+                                    "Comunica al usuario verbalmente con naturalidad y concisión "
+                                    "lo que observas en su pantalla respondiendo a su pregunta."
+                                ),
+                            },
+                        )
+                    ]
+                )
+            except Exception as exc:
+                print(f"[ActionRouter] Error enviando respuesta captura pantalla: {exc}")
+
+
     async def reject_busy_tool_call(self, call_id: str, name: str):
         """Cierra una tool call extra sin arrancar otra tarea Hermes."""
         active = self.synapse.active_turn
@@ -614,7 +806,7 @@ class ActionRouter:
         active = self.synapse.active_turn
         session = self.get_session()
 
-        if not self.has_active_work():
+        if not active or not self.has_active_work():
             pending = self.task_ledger.next_pending("hermes") if self.task_ledger else None
             if pending and self.task_ledger:
                 self.task_ledger.mark_interrupted(pending, "cancelada antes de ejecutarse")
@@ -635,10 +827,10 @@ class ActionRouter:
         await self.interrupt_active_turn("Cancelado por el usuario mediante voz.")
 
         deadline = time.monotonic() + 5.0
-        while active.state in (TurnState.CANCEL_REQUESTED, TurnState.BRAIN_RUNNING) and time.monotonic() < deadline:
+        while active and active.state in (TurnState.CANCEL_REQUESTED, TurnState.BRAIN_RUNNING) and time.monotonic() < deadline:
             await asyncio.sleep(0.1)
 
-        if active.state == TurnState.INTERRUPTED:
+        if active and active.state == TurnState.INTERRUPTED:
             if session:
                 await self._send_cancel_tool_response(
                     session, call_id, name, "success", "He cancelado la tarea compleja actual de inmediato."
@@ -871,8 +1063,18 @@ class ActionRouter:
 
             current_session = self.get_session()
             if not current_session:
-                print(f"[ActionRouter] Entrega pospuesta sin sesión activa: turno={turn.turn_id}")
-                return False
+                print(f"[ActionRouter] Sin sesión Live activa para turno {turn.turn_id}. Entregando vía TTS local...")
+                self.delivery_queue.mark_delivering(item)
+                if self.activation_gate:
+                    self.activation_gate.begin_delivery(wake_request)
+                if self.local_tts:
+                    clean_str = getattr(turn.brain_result, "text", "") if hasattr(turn, "brain_result") and turn.brain_result else item.text
+                    await self.local_tts.speak(clean_str or item.text)
+                self.delivery_queue.mark_delivered(item)
+                if self.activation_gate:
+                    self.activation_gate.finish_delivery()
+                print(f"[ActionRouter] Entrega enviada localmente: turno={turn.turn_id}, kind={kind}")
+                return True
 
             self.delivery_queue.mark_delivering(item)
             if self.activation_gate:
@@ -880,7 +1082,25 @@ class ActionRouter:
 
             await self._send_client_text(current_session, item.text)
             self.delivery_queue.mark_delivered(item)
+            if self.activation_gate:
+                self.activation_gate.finish_delivery()
             print(f"[ActionRouter] Entrega enviada: turno={turn.turn_id}, kind={kind}")
+
+            # Notificación remota si está configurada (Telegram / Discord)
+            try:
+                from src.adapters.notifications.remote_notifier import get_remote_notifier
+                notifier = get_remote_notifier()
+                if notifier.is_configured:
+                    clean_msg = getattr(turn.brain_result, "text", "") if hasattr(turn, "brain_result") and turn.brain_result else item.text
+                    asyncio.create_task(
+                        notifier.notify(
+                            message=clean_msg or item.text,
+                            title=f"Tarea completada ({turn.turn_id})",
+                        )
+                    )
+            except Exception as notif_err:
+                print(f"[ActionRouter] Error en notificación remota: {notif_err}")
+
             return True
         finally:
             # Eliminar si sigue presente por descarte asíncrono
@@ -902,6 +1122,61 @@ class ActionRouter:
             await self._queue_and_deliver_text(turn, failure_text, kind="hermes_failure", priority=10)
         except Exception as exc:
             print(f"[ActionRouter] Error inyectando fallo de cerebro: {exc}")
+
+    async def deliver_proactive_speech(self, message: str, priority: int = 60) -> bool:
+        """Entrega una alerta proactiva iniciada por el sistema al usuario por voz."""
+        wake_request = None
+        if self.activation_gate:
+            wake_request = self.activation_gate.request_wake(
+                source="sentinel",
+                reason="proactive_alert",
+                priority=priority,
+            )
+            self.activation_gate.begin_delivery(wake_request)
+
+        session = self.get_session()
+        delivered = False
+        if session:
+            try:
+                alert_text = (
+                    "[JARVIS INTERNAL DELIVERY - AVISO PROACTIVO DEL SISTEMA - NO USAR HERRAMIENTAS]\n"
+                    f"[Aviso proactivo]: {message}\n"
+                    "Comunica este aviso directamente al usuario de forma clara, natural y concisa."
+                )
+                await self._send_client_text(session, alert_text)
+                delivered = True
+                print(f"[ActionRouter] Alerta proactiva entregada vía Gemini Live.")
+            except Exception as e:
+                print(f"[ActionRouter] Error enviando alerta proactiva a Live: {e}")
+
+        if not delivered and self.local_tts:
+            try:
+                print(f"[ActionRouter] Entregando alerta proactiva vía Local TTS...")
+                await self.local_tts.speak(message)
+                delivered = True
+            except Exception as e:
+                print(f"[ActionRouter] Error entregando alerta proactiva vía Local TTS: {e}")
+
+        if self.activation_gate:
+            self.activation_gate.finish_delivery()
+
+        return delivered
+
+    async def dispatch_direct_task(self, prompt: str, lane: str = "slow") -> dict[str, Any]:
+        """Despacha una orden de texto directamente a Hermes desde el Cockpit UI."""
+        import uuid
+        call_id = f"direct_{uuid.uuid4().hex[:12]}"
+        tool_name = "ejecutar_hermes_core"
+        if lane == "fast" and self.brain_fast:
+            asyncio.create_task(self.run_fast_hermes(call_id, tool_name, prompt))
+            return {"call_id": call_id, "status": "dispatched", "lane": "fast_hermes"}
+        else:
+            if self.has_active_work():
+                await self.queue_hermes_tool_call(call_id, tool_name, prompt)
+                return {"call_id": call_id, "status": "queued", "lane": "slow_hermes"}
+            else:
+                asyncio.create_task(self.run_hermes(call_id, tool_name, prompt))
+                return {"call_id": call_id, "status": "running", "lane": "slow_hermes"}
 
     def _computing_sound(self):
         if _winsound:
@@ -1240,6 +1515,8 @@ class ActionRouter:
             await self.send_task_status_tool_call(call_id, tool_name)
         elif tool_name == "consultar_resumen_hoy":
             await self.send_today_summary_tool_call(call_id, tool_name)
+        elif tool_name == "guardar_memoria_usuario":
+            await self.save_user_memory_tool_call(call_id, tool_name, args, session)
         elif tool_name == "reproducir_musica_youtube":
             cancion = args.get("cancion", "")
             print(f"[ActionRouter] Reproduciendo en YouTube localmente: {cancion}")
@@ -1258,6 +1535,11 @@ class ActionRouter:
 
             import subprocess
             subprocess.Popen([sys.executable, _LOCAL_YOUTUBE_SCRIPT, cancion])
+
+            # No forzar sleep tras reproducir música — JARVIS se mantiene activo
+            # para que el usuario pueda dar órdenes adicionales sin re-activar.
+        elif tool_name == "capturar_pantalla":
+            await self._handle_screen_capture(call_id, tool_name, args, session)
         else:
             print(f"[ActionRouter] Herramienta local desconocida rechazada: name={tool_name}, args={args}")
             if session:

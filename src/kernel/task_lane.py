@@ -13,7 +13,7 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import Set, List
 
-from src.kernel.capability_registry import TaskCapability
+from src.kernel.capability_registry import capability_registry, TaskCapability
 
 class TaskLane(str, Enum):
     LOCAL = "local"
@@ -40,6 +40,8 @@ _LOCAL_TOOLS = frozenset({
     "consultar_estado_tareas",
     "consultar_resumen_hoy",
     "reproducir_musica_youtube",
+    "guardar_memoria_usuario",
+    "capturar_pantalla",
 })
 
 # ── Términos que FUERZAN SLOW sin importar el resto ───────────────────────────
@@ -60,9 +62,16 @@ _SLOW_FORCE_TERMS = (
     "recuerda", "recordar", "memoria", "memoriza", "memorizar",
     "aprende", "aprender", "aprendido", "skill", "habilidad",
     "preferencia", "preferencias", "personalidad",
-    # Análisis profundo
+    # Análisis profundo, visión y escritorio
     "analiza", "analizar", "analisis", "investigar", "investigacion",
+    "pantalla", "captura", "screenshot", "escritorio", "mira", "observa",
+    "imagen", "imagenes", "foto", "fotos", "video", "videos",
+    "dibuja", "dibujar", "genera imagen", "generar imagen",
     "proyecto", "proyectos",
+    # Integraciones externas, MCP y bases de datos
+    "mcp", "servidor mcp", "github", "repo", "repositorio", "pull request", "pr",
+    "postgres", "postgresql", "mysql", "sqlite", "base de datos", "database", "query",
+    "notion", "linear", "jira",
     # Comunicaciones
     "whatsapp", "correo", "email", "mensaje", "mensajes",
 )
@@ -226,9 +235,12 @@ def classify_tool_call(tool_name: str, args: dict | None = None) -> LaneDecision
     if _has_term(normalized, ("vision", "imagen", "imagenes", "pantalla", "screenshot", "captura", "mira esto")):
         decision.required_capabilities.add(TaskCapability.VISION)
 
-    # MCP
-    if _has_term(normalized, ("mcp", "herramienta mcp", "servidor mcp")):
-        decision.required_capabilities.add(TaskCapability.MCP)
+    # MCP (solo requerido si el registro de capacidades lo tiene activo)
+    if _has_term(normalized, ("servidor mcp", "herramienta mcp")):
+        if capability_registry.has_capability("slow", TaskCapability.MCP):
+            decision.required_capabilities.add(TaskCapability.MCP)
+        else:
+            decision.required_capabilities.add(TaskCapability.TERMINAL)
 
     # Home Assistant
     if _has_term(normalized, ("home assistant", "homeassistant", "enciende la luz", "apaga la luz", "dispositivo inteligente")):
@@ -253,12 +265,14 @@ def classify_tool_call(tool_name: str, args: dict | None = None) -> LaneDecision
             decision.reason = "tts_requires_slow"
 
     # 3. Clasificación de Niveles de Riesgo y Ambigüedad
-    # Riesgo HIGH: borrado/destrucción, transacciones, compras, mandar correos externos
-    high_keywords = ("borra", "borrar", "elimina", "eliminar", "destruye", "destruir", "compra", "comprar", "manda correo", "envia correo", "publica")
+    # Riesgo HIGH: borrado/destrucción de archivos, pagos directos, mandar correos externos
+    high_keywords = ("borra el", "borrar el", "elimina el", "eliminar el", "destruye el", "destruir el", "borra la", "elimina la", "destruye la", "ejecuta compra", "pagar con tarjeta", "manda correo", "envia correo", "publica en redes")
     # Riesgo MEDIUM: crear/editar archivos, programar cronjobs, instalar skills, abrir navegador
     medium_keywords = ("crea", "crear", "escribe", "escribir", "edita", "editar", "modifica", "modificar", "automatiza", "cron", "navega", "browser")
 
-    if _has_term(normalized, high_keywords):
+    is_search_query = _has_term(normalized, ("busca", "buscar", "donde", "investiga", "investigar", "averigua", "opciones", "plataformas", "ver"))
+
+    if _has_term(normalized, high_keywords) and not is_search_query:
         decision.risk = RiskLevel.HIGH
 
         # Validar ambigüedad en HIGH (ej. "borra todo", "elimina" sin especificar objetivo)

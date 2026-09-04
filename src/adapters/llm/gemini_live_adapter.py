@@ -18,6 +18,7 @@ import time
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from src.kernel.activation_gate import ActivationGate, ActivationState
 
 # ── Rutas ────────────────────────────────────────────────────────────────
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -34,6 +35,15 @@ if _HERMES_DIR not in sys.path:
 load_dotenv(encoding="utf-8")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY", "")
 
+# Carga todas las claves disponibles para rotación en Gemini Live
+_raw_live_keys = [
+    os.getenv("GEMINI_API_KEY"),
+    os.getenv("GOOGLE_API_KEY"),
+    *[os.getenv(f"GEMINI_API_KEY_{i}") for i in range(1, 30)],
+    *[os.getenv(f"HERMES_API_KEY_{i}") for i in range(1, 30)],
+]
+GEMINI_LIVE_KEYS: list[str] = list(dict.fromkeys(k.strip() for k in _raw_live_keys if k and k.strip()))
+
 # Carga todas las claves de Hermes definidas como HERMES_API_KEY_1, _2, _3...
 # Fallback a GEMINI_API_KEY si no hay ninguna.
 _raw_hermes_keys = [
@@ -44,9 +54,15 @@ HERMES_API_KEYS: list[str] = [k for k in _raw_hermes_keys if k] or [GEMINI_API_K
 
 INPUT_RATE  = 16_000   # Gemini Live espera entrada a 16 kHz
 OUTPUT_RATE = 24_000   # Gemini Live devuelve audio a 24 kHz
-MODEL_LIVE  = os.getenv("MODEL_LIVE", "gemini-3.1-flash-live-preview")
-MODEL_BRAIN = os.getenv("MODEL_BRAIN", "gemini-3.1-flash-lite")
-VOICE_NAME  = os.getenv("VOICE_NAME", "Aoede")
+_MODEL_LIVE_DEFAULT  = os.getenv("MODEL_LIVE", "gemini-3.1-flash-live-preview")
+_MODEL_BRAIN_DEFAULT = os.getenv("MODEL_BRAIN", "gemini-3.1-flash-lite")
+_VOICE_NAME_DEFAULT  = os.getenv("VOICE_NAME", "Aoede")
+
+# Nota: MODEL_LIVE y VOICE_NAME se leen dinamicamente en cada reconexion
+# para que los cambios del Panel de Control tomen efecto sin reiniciar.
+def _get_model_live()  -> str: return os.getenv("MODEL_LIVE",  _MODEL_LIVE_DEFAULT)
+def _get_voice_name()  -> str: return os.getenv("VOICE_NAME",  _VOICE_NAME_DEFAULT)
+def _get_model_brain() -> str: return os.getenv("MODEL_BRAIN", _MODEL_BRAIN_DEFAULT)
 LIVE_SESSION_SOFT_REFRESH_SECONDS = int(os.getenv("LIVE_SESSION_SOFT_REFRESH_SECONDS", "720"))
 LIVE_SESSION_FORCE_REFRESH_SECONDS = int(os.getenv("LIVE_SESSION_FORCE_REFRESH_SECONDS", "840"))
 LIVE_DEBUG_AUDIO = os.getenv("LIVE_DEBUG_AUDIO", "").lower() in {"1", "true", "yes", "on"}
@@ -84,8 +100,14 @@ class GeminiLiveAdapter(IVoiceAssistant):
         self.conversation_sessions = conversation_sessions
         self.cognitive_policy = cognitive_policy or CognitivePolicy()
 
+        self.api_keys = GEMINI_LIVE_KEYS or ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+        self.current_key_index = 0
+        current_key = self.api_keys[0] if self.api_keys else ""
+        if len(self.api_keys) > 1:
+            print(f"\033[95m[LiveAdapter]\033[0m Pool de {len(self.api_keys)} clave(s) activo para Gemini Live.")
+
         self.client = genai.Client(
-            api_key=GEMINI_API_KEY,
+            api_key=current_key,
             http_options=types.HttpOptions(api_version="v1alpha"),
         )
         self.session = None
@@ -102,6 +124,12 @@ class GeminiLiveAdapter(IVoiceAssistant):
             "GoAway" in text
             or "failed to close the connection" in text
             or "received 1008" in text
+            or "1008" in text
+            or "received 1011" in text
+            or "1011" in text
+            or "1006" in text
+            or "internal error" in text.lower()
+            or "connection reset" in text.lower()
             or "policy violation" in text
         )
 
@@ -114,6 +142,20 @@ class GeminiLiveAdapter(IVoiceAssistant):
             or "rate_limit" in text
             or "429" in text
         )
+
+    def _rotate_api_key(self) -> bool:
+        """Rota a la siguiente API Key disponible para evadir 429. Retorna True si rotó a una key distinta."""
+        if len(self.api_keys) <= 1:
+            return False
+        self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
+        new_key = self.api_keys[self.current_key_index]
+        masked = new_key[:4] + "..." + new_key[-4:] if len(new_key) > 8 else "***"
+        print(f"\033[95m[LiveAdapter]\033[0m Rotando a clave Gemini Live #{self.current_key_index + 1} ({masked})")
+        self.client = genai.Client(
+            api_key=new_key,
+            http_options=types.HttpOptions(api_version="v1alpha"),
+        )
+        return True
 
     async def _pause_after_quota_error(self, delay_seconds: float) -> None:
         delay_seconds = max(1.0, delay_seconds)
@@ -144,6 +186,12 @@ class GeminiLiveAdapter(IVoiceAssistant):
         if kind == "speech":
             self._policy().record_user_utterance(text)
             self._hermes_speech_revision = getattr(self, "_hermes_speech_revision", 0) + 1
+            synapse = getattr(self.hermes_router, "synapse", None) if hasattr(self, "hermes_router") else None
+            if synapse:
+                try:
+                    synapse.emit("user_voice_received", {"text": text, "kind": kind})
+                except Exception:
+                    pass
         conversation_sessions = getattr(self, "conversation_sessions", None)
         if conversation_sessions:
             conversation_sessions.record_user(text, kind=kind, session_epoch=self.session_epoch)
@@ -243,14 +291,12 @@ class GeminiLiveAdapter(IVoiceAssistant):
             return not activation_gate.allows_model_output()
         return REQUIRE_RECENT_VOICE_FOR_TOOLS and self._is_reconnect_grace_active()
 
-    @staticmethod
-    def _has_hermes_tool_call(msg) -> bool:
+    def _has_hermes_tool_call(self, msg) -> bool:
         tool_call = getattr(msg, "tool_call", None)
-        function_calls = getattr(tool_call, "function_calls", None) if tool_call else None
-        return any(
-            getattr(fn, "name", "") == "ejecutar_hermes_core"
-            for fn in (function_calls or [])
-        )
+        if not tool_call:
+            return False
+        function_calls = getattr(tool_call, "function_calls", None) or []
+        return any(getattr(fn, "name", "") == "ejecutar_hermes_core" for fn in function_calls)
 
     def _should_suppress_model_turn(self, msg) -> tuple[bool, str]:
         if self._should_suppress_reconnect_output():
@@ -261,10 +307,8 @@ class GeminiLiveAdapter(IVoiceAssistant):
 
     def _claim_response_for_hermes(self, prompt: str) -> None:
         print(
-            "\033[95m[JARVIS]\033[0m Turno delegado a Hermes; salida Live directa descartada "
-            f"(prompt_chars={len(prompt)})."
+            f"\033[95m[JARVIS]\033[0m Tarea delegada a Hermes en segundo plano (prompt_chars={len(prompt)})."
         )
-        print("[LiveAdapter] direct_output suppressed reason=delivery_claimed")
 
     async def _reject_tool_without_recent_voice(self, call_id: str, name: str):
         print(f"\033[95m[JARVIS]\033[0m Tool call ignorada sin voz reciente: {name}")
@@ -333,7 +377,7 @@ class GeminiLiveAdapter(IVoiceAssistant):
             print("\033[91m[ERROR] Falta GEMINI_API_KEY / GOOGLE_API_KEY en .env\033[0m")
             return
 
-        print(f"\033[95m[JARVIS]\033[0m Iniciando sistema Auto-Reconexión para {MODEL_LIVE}…")
+        print(f"\033[95m[JARVIS]\033[0m Iniciando sistema Auto-Reconexión para {_get_model_live()}…")
         try:
             self.is_running = True
             self.capture.start()
@@ -341,23 +385,32 @@ class GeminiLiveAdapter(IVoiceAssistant):
 
             reconnect_count = 0
             quota_backoff_seconds = LIVE_QUOTA_BACKOFF_SECONDS
+            network_backoff_seconds = 2.0
             while self.is_running:
                 # Obtener la configuración fresca del gestor de contexto (incluye memoria inyectada)
                 config = self.context_mgr.get_live_config()
 
                 try:
-                    async with self.client.aio.live.connect(model=MODEL_LIVE, config=config) as session:
+                    model_live = _get_model_live()
+                    print(f"\033[95m[JARVIS]\033[0m Conectando con modelo={model_live}, voz={_get_voice_name()}")
+                    async with self.client.aio.live.connect(model=model_live, config=config) as session:
                         self.session = session
                         reset_recent_voice = getattr(self.capture, "reset_recent_voice", None)
                         if callable(reset_recent_voice):
                             reset_recent_voice()
                         self._session_started_at = time.monotonic()
+                        
+                        # Restablecer backoffs tras una conexión exitosa
+                        network_backoff_seconds = 2.0
+                        quota_backoff_seconds = LIVE_QUOTA_BACKOFF_SECONDS
+
                         if self.activation_gate:
-                            # Primer inicio de sesión de la ejecución: activar de inmediato
                             is_first_session = (self.session_epoch == 0)
                             self.session_epoch = self.activation_gate.start_live_session("live_connected")
                             if is_first_session:
-                                self.activation_gate.mark_user_voice("initial_activation")
+                                recent_wake = (time.time() - getattr(self.activation_gate, "last_wake_word_at", 0.0)) < 15.0
+                                if not recent_wake and getattr(self.activation_gate, "state", None) != ActivationState.ACTIVE:
+                                    self.activation_gate.force_sleep("initial_startup_dormant")
                         else:
                             self.session_epoch += 1
                         self._reconnect_output_suppressed_logged = False
@@ -401,11 +454,15 @@ class GeminiLiveAdapter(IVoiceAssistant):
                             quota_backoff_seconds = LIVE_QUOTA_BACKOFF_SECONDS
                             print("\033[95m[JARVIS]\033[0m Sesion reciclada preventivamente. Reconectando en silencio...")
                         elif recycle_reason == "quota":
-                            await self._pause_after_quota_error(quota_backoff_seconds)
-                            quota_backoff_seconds = min(
-                                LIVE_QUOTA_MAX_BACKOFF_SECONDS,
-                                quota_backoff_seconds * 2,
-                            )
+                            if self._rotate_api_key():
+                                print("\033[95m[JARVIS]\033[0m Reintentando con nueva clave de Live tras cuota agotada...")
+                                await asyncio.sleep(1.0)
+                            else:
+                                await self._pause_after_quota_error(quota_backoff_seconds)
+                                quota_backoff_seconds = min(
+                                    LIVE_QUOTA_MAX_BACKOFF_SECONDS,
+                                    quota_backoff_seconds * 2,
+                                )
                         elif recycle_reason == "goaway":
                             quota_backoff_seconds = LIVE_QUOTA_BACKOFF_SECONDS
                             print("\033[95m[JARVIS]\033[0m Sesion Live expiro; reciclando conexion...")
@@ -420,18 +477,26 @@ class GeminiLiveAdapter(IVoiceAssistant):
                         quota_backoff_seconds = LIVE_QUOTA_BACKOFF_SECONDS
                         print("\033[95m[JARVIS]\033[0m Refresco preventivo exitoso.")
                     elif self._is_live_quota_error(exc):
-                        await self._pause_after_quota_error(quota_backoff_seconds)
-                        quota_backoff_seconds = min(
-                            LIVE_QUOTA_MAX_BACKOFF_SECONDS,
-                            quota_backoff_seconds * 2,
-                        )
+                        if self._rotate_api_key():
+                            print("\033[95m[JARVIS]\033[0m Reintentando con nueva clave de Live tras cuota agotada...")
+                            await asyncio.sleep(1.0)
+                        else:
+                            await self._pause_after_quota_error(quota_backoff_seconds)
+                            quota_backoff_seconds = min(
+                                LIVE_QUOTA_MAX_BACKOFF_SECONDS,
+                                quota_backoff_seconds * 2,
+                            )
                     elif self._is_session_recycle_error(exc):
                         quota_backoff_seconds = LIVE_QUOTA_BACKOFF_SECONDS
                         print("\033[95m[JARVIS]\033[0m Sesion Live expiro; reconectando en 2s...")
                         await asyncio.sleep(2)
                     else:
-                        print(f"\033[95m[JARVIS]\033[0m Caída de red detectada ({exc}). Reconectando en 2s...")
-                        await asyncio.sleep(2)
+                        print(f"\033[95m[JARVIS]\033[0m Caída de red detectada ({exc}). Reconectando en {network_backoff_seconds:.1f}s...")
+                        await asyncio.sleep(network_backoff_seconds)
+                        network_backoff_seconds = min(
+                            60.0,
+                            network_backoff_seconds * 2,
+                        )
 
                     reconnect_count += 1
         except Exception as exc:
@@ -449,24 +514,56 @@ class GeminiLiveAdapter(IVoiceAssistant):
         self.capture.stop()
         self.playback.stop()
 
+    def restart_session(self):
+        """Solicita reciclar la sesión Live de forma segura desde cualquier hilo."""
+        self._reconnect_requested = True
+        print("\033[95m[LiveAdapter]\033[0m Solicitud de reinicio de sesión recibida.")
+
     async def _session_watchdog(self):
         """Evita el corte brusco de Google (15 min) refrescando la sesión en un momento de silencio."""
         watchdog_epoch = self.session_epoch
         start_time = time.time()
+        was_busy = False
         while self.is_running and self.session:
             if watchdog_epoch != self.session_epoch:
                 break
+            if getattr(self, "_reconnect_requested", False):
+                self._reconnect_requested = False
+                print("\033[95m[JARVIS]\033[0m Reiniciando sesión Live a petición del usuario...")
+                raise Exception("Proactive_Refresh")
             elapsed = time.time() - start_time
             if self.activation_gate:
-                if self.activation_gate.sleep_if_idle():
-                    self._close_conversation_session("idle_timeout")
+                is_playback_busy = getattr(self.playback, "is_busy", False)
+                is_hermes_busy = (
+                    self.hermes_router.has_active_work()
+                    if getattr(self, "hermes_router", None)
+                    else False
+                )
+                is_busy = is_playback_busy or is_hermes_busy
+                if is_busy:
+                    self.activation_gate.touch_voice()
+                    if self.activation_gate.state == ActivationState.DORMANT and is_hermes_busy:
+                        self.activation_gate.mark_user_voice("hermes_active_work")
+                    was_busy = True
+                else:
+                    if was_busy:
+                        # Acaba de terminar de hablar el altavoz o de trabajar Hermes:
+                        # renovar tiempo para que el usuario tenga la ventana de 30s completa
+                        self.activation_gate.touch_voice()
+                        if self.activation_gate.state == ActivationState.DELIVERING:
+                            self.activation_gate.finish_delivery()
+                        elif self.activation_gate.state == ActivationState.DORMANT:
+                            self.activation_gate.mark_user_voice("hermes_work_completed")
+                        was_busy = False
+                    elif self.activation_gate.sleep_if_idle():
+                        self._close_conversation_session("idle_timeout")
             if elapsed > LIVE_SESSION_FORCE_REFRESH_SECONDS:
                 print("[JARVIS] Refrescando sesion proactivamente por limite de duracion...")
                 raise Exception("Proactive_Refresh")
             if elapsed > LIVE_SESSION_SOFT_REFRESH_SECONDS and not getattr(self.playback, "is_busy", False):
                 print("[JARVIS] Refrescando sesion proactivamente en silencio...")
                 raise Exception("Proactive_Refresh")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
 
     # ── Envío de audio (micrófono → Gemini) ──────────────────────────────
     async def _send_audio(self):
@@ -477,9 +574,11 @@ class GeminiLiveAdapter(IVoiceAssistant):
                 break
             try:
                 chunk = await self.capture.read_chunk()
-                has_recent_voice = getattr(self.capture, "has_recent_voice", None)
-                if callable(has_recent_voice) and has_recent_voice(0.25):
-                    self._mark_user_voice("audio_activity")
+                # Si el altavoz está reproduciendo la respuesta de JARVIS, silenciar el audio hacia Gemini
+                # para evitar que Gemini escuche su propio eco y se auto-interrumpa (Acoustic Echo Suppression)
+                if getattr(self.playback, "is_busy", False):
+                    chunk = b"\x00" * len(chunk)
+
                 await self.session.send_realtime_input(
                     audio=types.Blob(data=chunk, mime_type=f"audio/pcm;rate={INPUT_RATE}")
                 )
@@ -507,8 +606,11 @@ class GeminiLiveAdapter(IVoiceAssistant):
                         sc = msg.server_content
                         input_text = self._extract_transcription_text(getattr(sc, "input_transcription", None))
                         if input_text:
+                            self._mark_user_voice("user_transcription")
                             self._record_user_text(input_text, kind="speech")
                         if sc.model_turn:
+                            if hasattr(self.playback, "touch"):
+                                self.playback.touch()
                             suppress_model_turn, suppress_reason = self._should_suppress_model_turn(msg)
                             if suppress_model_turn:
                                 if suppress_reason == "post_reconnect" and not self._reconnect_output_suppressed_logged:
@@ -524,9 +626,16 @@ class GeminiLiveAdapter(IVoiceAssistant):
                                         if LIVE_DEBUG_AUDIO:
                                             print(f" [Audio rec. {len(part.inline_data.data)}b] ", end="", flush=True)
                                         self.playback.enqueue(part.inline_data.data)
+                                        if self.activation_gate:
+                                            self.activation_gate.touch_voice()
                                     if part.text:
                                         print(f"\n[JARVIS Texto] {part.text.strip()}", flush=True)
                                         self._record_assistant_text(part.text.strip(), kind="speech")
+                        if getattr(sc, "turn_complete", False):
+                            if self.activation_gate:
+                                self.activation_gate.touch_voice()
+                                if self.activation_gate.state == ActivationState.DELIVERING:
+                                    self.activation_gate.finish_delivery()
                         if sc.interrupted:
                             print("\n[JARVIS] Interrumpida.", flush=True)
                             # Barge-in de voz: solo corta la respuesta hablada.
@@ -535,6 +644,7 @@ class GeminiLiveAdapter(IVoiceAssistant):
 
                     # Llamadas a funciones
                     if msg.tool_call:
+                        self._mark_user_voice("tool_call")
                         for fn in msg.tool_call.function_calls:
                             args = dict(getattr(fn, "args", {}) or {})
                             decision = self._policy().evaluate_tool_call(
@@ -573,19 +683,31 @@ class GeminiLiveAdapter(IVoiceAssistant):
                                     "Consultar resumen local de hoy",
                                     kind="today_summary_tool_call",
                                 )
+                            elif fn.name == "guardar_memoria_usuario":
+                                contenido = args.get("contenido", "")
+                                self._record_user_text(f"Guardar memoria/aprendizaje: {contenido}", kind="memory_tool_call")
+                                print(f"[JARVIS] Autoaprendizaje registrado: {contenido}")
                             elif fn.name == "reproducir_musica_youtube":
                                 cancion = args.get("cancion", "")
                                 self._record_user_text(f"Reproducir en YouTube: {cancion}", kind="music_tool_call")
                                 print(f"[JARVIS] Reproduciendo en YouTube: {cancion}")
+                            elif fn.name == "capturar_pantalla":
+                                consulta = args.get("consulta", "")
+                                self._record_user_text(f"Capturar pantalla: {consulta}", kind="screen_capture_tool_call")
+                                print(f"[JARVIS] Captura de pantalla solicitada: {consulta}")
 
                             print(f"[ToolGate] Tool call aceptada: {fn.name} ({decision.reason})")
                             print(f"[LiveAdapter] delegated call={fn.id} tool={fn.name} suppress_live_output=true")
                             if self.hermes_router:
-                                asyncio.create_task(
-                                    self.hermes_router.submit_tool_call(
-                                        fn.name, args, self.session, fn.id
-                                    )
-                                )
+                                async def _safe_dispatch(t_name, t_args, t_session, t_id):
+                                    try:
+                                        await self.hermes_router.submit_tool_call(t_name, t_args, t_session, t_id)
+                                    except Exception as exc:
+                                        print(f"[JARVIS] Error despachando tool call {t_name}: {exc}")
+                                        import traceback
+                                        traceback.print_exc()
+
+                                asyncio.create_task(_safe_dispatch(fn.name, args, self.session, fn.id))
                             else:
                                 print("[JARVIS] Error: hermes_router no está inicializado.")
             except asyncio.CancelledError:

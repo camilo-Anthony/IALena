@@ -81,9 +81,44 @@ export const jarvisAPI = {
       method: "POST",
     }),
 
-  // Hermes Info
+  // Hermes Info & Launch
   getHermesMCPs: () =>
     request<{ mcps: HermesMCP[]; config_path: string; found: boolean }>("/hermes/mcps"),
+  saveHermesMCP: (server: {
+    name: string;
+    command?: string;
+    args?: string[];
+    url?: string;
+    enabled?: boolean;
+    env?: Record<string, string>;
+  }) =>
+    request<{ success: boolean; name?: string; error?: string }>("/hermes/mcps", {
+      method: "POST",
+      body: JSON.stringify(server),
+    }),
+  toggleHermesMCP: (name: string) =>
+    request<{ success: boolean; enabled?: boolean; error?: string }>(`/hermes/mcps/${name}/toggle`, {
+      method: "POST",
+    }),
+  deleteHermesMCP: (name: string) =>
+    request<{ success: boolean; removed?: string; error?: string }>(`/hermes/mcps/${name}`, {
+      method: "DELETE",
+    }),
   getHermesToolsets: () =>
     request<HermesToolsets>("/hermes/toolsets"),
+  getHermesSkills: () =>
+    request<{ skills: Array<{ name: string; description: string }> }>("/hermes/skills"),
+  // Hermes Cockpit & Autonomy
+  getHermesTasks: () => request<TasksPayload>("/hermes/tasks"),
+  dispatchHermesTask: (prompt: string, lane: "slow" | "fast" = "slow") =>
+    request<{ call_id: string; status: string; lane: string }>("/hermes/dispatch", {
+      method: "POST",
+      body: JSON.stringify({ prompt, lane }),
+    }),
+  getAutonomyStatus: () =>
+    request<{ scheduler: any; sentinel: any }>("/hermes/status"),
+  launchHermes: () =>
+    request<{ status: string; message: string }>("/hermes/launch", {
+      method: "POST",
+    }),
 };

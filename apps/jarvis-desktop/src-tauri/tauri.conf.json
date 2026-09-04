@@ -1,5 +1,4 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
   "productName": "appsjarvis-desktop",
   "version": "0.1.0",
   "identifier": "com.hp.appsjarvis-desktop",
@@ -12,11 +11,16 @@
   "app": {
     "windows": [
       {
-        "title": "JARVIS",
-        "width": 360,
-        "height": 360,
+        "label": "main",
+        "title": "",
+        "fullscreen": false,
+        "maximized": false,
         "transparent": true,
-        "decorations": false
+        "decorations": false,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {

@@ -1,11 +1,28 @@
 import abc
 
+
 class IAudioCapture(abc.ABC):
     """Interfaz para la captura de audio (Micrófono)."""
+    _muted: bool = False
+
+    @property
+    def muted(self) -> bool:
+        """Indica si el micrófono está silenciado."""
+        return self._muted
+
+    @muted.setter
+    def muted(self, value: bool) -> None:
+        self._muted = bool(value)
+
 
     @abc.abstractmethod
     def start(self):
         """Inicia la captura de audio."""
+        pass
+
+    @abc.abstractmethod
+    def stop(self):
+        """Detiene la captura de audio."""
         pass
 
     @abc.abstractmethod
@@ -25,6 +42,11 @@ class IAudioPlayback(abc.ABC):
     @abc.abstractmethod
     def start(self):
         """Inicia el reproductor de audio."""
+        pass
+
+    @abc.abstractmethod
+    def stop(self):
+        """Detiene la reproducción de audio."""
         pass
 
     @abc.abstractmethod

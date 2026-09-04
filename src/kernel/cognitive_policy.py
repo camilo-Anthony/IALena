@@ -5,7 +5,7 @@ import unicodedata
 from dataclasses import dataclass
 
 
-MUSIC_TOOL_INTENT_WINDOW_SECONDS = float(os.getenv("MUSIC_TOOL_INTENT_WINDOW_SECONDS", "8.0"))
+MUSIC_TOOL_INTENT_WINDOW_SECONDS = float(os.getenv("MUSIC_TOOL_INTENT_WINDOW_SECONDS", "15.0"))
 COGNITIVE_UTTERANCE_RETENTION_SECONDS = float(os.getenv("COGNITIVE_UTTERANCE_RETENTION_SECONDS", "30.0"))
 
 
@@ -55,6 +55,12 @@ CANCEL_TOOL_INTENT_TERMS = (
     "interrumpe",
     "interrumpir",
     "stop",
+    "olvidalo",
+    "dejalo",
+    "ya no",
+    "no hagas nada",
+    "basta",
+    "corta",
 )
 
 CANCEL_TOOL_NEGATIVE_TERMS = (
@@ -193,6 +199,75 @@ HERMES_INTENT_TERMS = (
     "correo",
     "agenda",
     "calendario",
+    "mcp",
+    "servidor mcp",
+    "github",
+    "postgres",
+    "mysql",
+    "base de datos",
+    "database",
+    "notion",
+    "linear",
+    "jira",
+    "pantalla",
+    "captura",
+    "screenshot",
+    "escritorio",
+    "imagen",
+    "imagenes",
+    "video",
+    "videos",
+    "capacidades",
+    "habilidades",
+    "escribe",
+    "escribir",
+    "corrige",
+    "corregir",
+    "instala",
+    "instalar",
+    "mira",
+    "mirar",
+    "inspecciona",
+    "inspeccionar",
+    "automatiza",
+    "automatizar",
+    "depura",
+    "depurar",
+    "debug",
+    "debuggear",
+    "test",
+    "testear",
+    "prueba",
+    "probar",
+    "compila",
+    "compilar",
+    "refactoriza",
+    "refactorizar",
+    "docker",
+    "git",
+    "commit",
+    "push",
+    "pull",
+    "branch",
+    "servidor",
+    "api",
+    "endpoint",
+    "sql",
+    "query",
+    "blender",
+    "render",
+    "renderizar",
+    "proceso",
+    "procesos",
+    "log",
+    "logs",
+    "error",
+    "errores",
+    "bug",
+    "bugs",
+    "problema",
+    "soluciona",
+    "solucionar",
 )
 
 HERMES_PHRASE_INTENTS = (
@@ -204,6 +279,12 @@ HERMES_PHRASE_INTENTS = (
     "mis preferencias",
     "mi nombre",
     "mi personalidad",
+    "que puedes hacer",
+    "que sabes hacer",
+    "cuales son tus capacidades",
+    "cuales son tus habilidades",
+    "que herramientas tienes",
+    "como funcionas",
 )
 
 SIMPLE_LIVE_ONLY_TERMS = (
@@ -293,10 +374,18 @@ class CognitivePolicy:
             self.recent_user_text(self.music_intent_window_seconds)
         )
         if not normalized:
-            return False
+            if self._recent_user_utterances:
+                return False
+            # Si no hay texto reciente ni historial previo, permitir si el modelo generó una canción específica
+            return bool(song and song.lower() not in {"musica", "musica variada", "cancion", "algo"})
+
         if self._contains_term(normalized, MUSIC_TOOL_NEGATIVE_TERMS):
             return False
-        return self._contains_term(normalized, MUSIC_TOOL_INTENT_TERMS)
+
+        # Si el usuario mencionó cualquier término o nombre de canción
+        if song and self.normalize_for_intent(song) in normalized:
+            return True
+        return self._contains_term(normalized, MUSIC_TOOL_INTENT_TERMS) or len(normalized.split()) >= 2
 
     @staticmethod
     def music_tool_enabled() -> bool:
@@ -308,13 +397,21 @@ class CognitivePolicy:
 
     def has_explicit_cancel_request(self) -> bool:
         normalized = self.normalize_for_intent(
-            self.recent_user_text(self.music_intent_window_seconds)
+            self.recent_user_text(max(8.0, self.music_intent_window_seconds))
         )
         if not normalized:
-            return False
+            return True
         if self._contains_term(normalized, CANCEL_TOOL_NEGATIVE_TERMS):
             return False
-        return self._contains_term(normalized, CANCEL_TOOL_INTENT_TERMS)
+        return (
+            self._contains_term(normalized, CANCEL_TOOL_INTENT_TERMS)
+            or "cancel" in normalized
+            or "para" in normalized
+            or "stop" in normalized
+            or "dejalo" in normalized
+            or "olvidalo" in normalized
+            or "ya no" in normalized
+        )
 
     def has_explicit_task_status_request(self) -> bool:
         normalized = self.normalize_for_intent(
@@ -337,21 +434,32 @@ class CognitivePolicy:
     def has_explicit_hermes_request(self, prompt: str = "") -> bool:
         recent_text = self.recent_user_text(self.utterance_retention_seconds)
         normalized_recent = self.normalize_for_intent(recent_text)
-        if not normalized_recent:
-            return False
+        normalized_prompt = self.normalize_for_intent(prompt)
 
-        if normalized_recent in SIMPLE_LIVE_ONLY_TERMS:
-            return False
-
-        if self._contains_term(normalized_recent, HERMES_INTENT_TERMS):
-            return True
-
-        if not self.music_tool_enabled() and self._contains_term(normalized_recent, MUSIC_TOOL_INTENT_TERMS):
-            if self._contains_term(normalized_recent, MUSIC_TOOL_NEGATIVE_TERMS):
+        # Evaluar texto reciente de voz si está disponible
+        if normalized_recent:
+            if normalized_recent in SIMPLE_LIVE_ONLY_TERMS:
                 return False
-            return True
+            if self._contains_term(normalized_recent, HERMES_INTENT_TERMS):
+                return True
+            if not self.music_tool_enabled() and self._contains_term(normalized_recent, MUSIC_TOOL_INTENT_TERMS):
+                if not self._contains_term(normalized_recent, MUSIC_TOOL_NEGATIVE_TERMS):
+                    return True
+            if any(phrase in normalized_recent for phrase in HERMES_PHRASE_INTENTS):
+                return True
 
-        return any(phrase in normalized_recent for phrase in HERMES_PHRASE_INTENTS)
+        # Fallback al prompt explícito generado por el modelo
+        if normalized_prompt:
+            if normalized_prompt in SIMPLE_LIVE_ONLY_TERMS:
+                return False
+            if self._contains_term(normalized_prompt, HERMES_INTENT_TERMS):
+                return True
+            if any(phrase in normalized_prompt for phrase in HERMES_PHRASE_INTENTS):
+                return True
+            if len(normalized_prompt.split()) >= 3:
+                return True
+
+        return False
 
     def evaluate_tool_call(
         self,
@@ -371,13 +479,13 @@ class CognitivePolicy:
             if not self.music_tool_enabled():
                 return ToolDecision.reject(
                     "ignorado",
-                    "La herramienta directa de YouTube esta desactivada; delega la solicitud al cerebro principal.",
+                    "La herramienta directa de YouTube esta desactivada. Responde conversacionalmente por voz.",
                     "musica_tool_desactivada",
                 )
             if not self.has_explicit_music_request(song):
                 return ToolDecision.reject(
                     "ignorado",
-                    "No detecte una orden explicita para reproducir musica o abrir YouTube.",
+                    "No se detectó una orden explícita para reproducir música en este turno. Si el usuario solo saludó o te habló, respóndele amablemente por voz.",
                     "musica_sin_intencion_explicita",
                 )
             return ToolDecision.allow("musica_confirmada")
@@ -396,6 +504,25 @@ class CognitivePolicy:
 
         if name == "consultar_resumen_hoy":
             return ToolDecision.allow("resumen_hoy_confirmado")
+
+        if name == "guardar_memoria_usuario":
+            texto = str((args or {}).get("contenido") or (args or {}).get("texto") or "").strip()
+            if not texto:
+                return ToolDecision.reject(
+                    "ignorado",
+                    "No hay texto para registrar en la memoria persistente.",
+                    "memoria_texto_vacio",
+                )
+            if not has_recent_voice:
+                return ToolDecision.reject(
+                    "ignorado",
+                    "No se puede guardar memoria de usuario sin intervencion de voz reciente.",
+                    "memoria_sin_voz_reciente",
+                )
+            return ToolDecision.allow("memoria_usuario_confirmada")
+
+        if name == "capturar_pantalla":
+            return ToolDecision.allow("captura_pantalla_confirmada")
 
         if name == "ejecutar_hermes_core":
             prompt = str((args or {}).get("prompt", ""))

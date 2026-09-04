@@ -26,10 +26,16 @@ class BrainResult:
 class IAgentBrain(abc.ABC):
     """Interfaz para el agente de inteligencia asíncrona de JARVIS"""
 
+    model_brain: str = "unknown"
+
     @abc.abstractmethod
     async def run_task(self, task: str, event_listener: Optional[Callable] = None) -> BrainResult:
         """Ejecuta una tarea compleja en el cerebro y devuelve un BrainResult."""
         pass
+
+    async def think(self, prompt: str, event_listener: Optional[Callable] = None) -> BrainResult:
+        """Alias conveniente para run_task."""
+        return await self.run_task(prompt, event_listener=event_listener)
 
     @abc.abstractmethod
     def is_available(self) -> bool:

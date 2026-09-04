@@ -93,6 +93,9 @@ class Synapse:
             # Si no hay loop (ej. modo testing síncrono), despachamos directo
             _dispatch()
 
+    emit = publish
+    on = subscribe
+
     def create_turn(self, user_prompt: str = "") -> TurnRecord:
         """Inicia un nuevo turno, generando un turn_id único."""
         # Nota: La orquestación de cancelación de tareas viejas

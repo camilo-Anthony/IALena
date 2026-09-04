@@ -20,6 +20,7 @@ interface JarvisState {
   logs: LogEntry[];
   wsConnected: boolean;
   activeView: "orb" | "panel" | "hermes";
+  activePanelTab: string;
 
   // Actions
   setOrbState: (s: OrbState) => void;
@@ -30,6 +31,7 @@ interface JarvisState {
   prependLogs: (entries: LogEntry[]) => void;
   setWsConnected: (v: boolean) => void;
   setActiveView: (v: "orb" | "panel" | "hermes") => void;
+  setActivePanelTab: (t: string) => void;
   clearLogs: () => void;
 }
 
@@ -42,6 +44,7 @@ export const useJarvisStore = create<JarvisState>((set) => ({
   logs: [],
   wsConnected: false,
   activeView: "orb",
+  activePanelTab: "dashboard",
 
   setOrbState: (orbState) => set({ orbState }),
 
@@ -68,6 +71,8 @@ export const useJarvisStore = create<JarvisState>((set) => ({
   setWsConnected: (wsConnected) => set({ wsConnected }),
 
   setActiveView: (activeView) => set({ activeView }),
+
+  setActivePanelTab: (activePanelTab) => set({ activePanelTab }),
 
   clearLogs: () => set({ logs: [] }),
 }));

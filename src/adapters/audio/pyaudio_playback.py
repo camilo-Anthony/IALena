@@ -3,6 +3,8 @@ Módulo de reproducción de audio para JARVIS S2S.
 Reproduce audio PCM recibido del servidor de voz en los altavoces
 de forma continua usando PyAudio con cola thread-safe.
 """
+import os
+import time
 import pyaudio
 import queue
 # pyrefly: ignore [missing-import]
@@ -22,11 +24,22 @@ class PyAudioPlayback(IAudioPlayback):
         self._queue = queue.Queue()
         self._buffer = bytearray()
         self._playing = False
+        self._last_active_at = 0.0
+        self._hangover_seconds = max(0.05, float(os.getenv("PLAYBACK_AEC_HANGOVER_SECONDS", "0.15")))
 
     @property
     def is_busy(self) -> bool:
-        """Devuelve True si todavía hay audio reproduciéndose o en la cola."""
-        return not self._queue.empty() or len(self._buffer) > 0
+        """Devuelve True si todavía hay audio reproduciéndose o en la cola, más cola de decaimiento acústico."""
+        now = time.monotonic()
+        has_audio = (not self._queue.empty()) or (len(self._buffer) > 0)
+        if has_audio:
+            self._last_active_at = now
+            return True
+        return (now - self._last_active_at) < self._hangover_seconds
+
+    def touch(self):
+        """Marca actividad reciente de reproducción para suprimir eco anticipado."""
+        self._last_active_at = time.monotonic()
 
     def start(self):
         """Abre el stream de salida y comienza a reproducir."""
@@ -71,13 +84,18 @@ class PyAudioPlayback(IAudioPlayback):
         """Agrega audio PCM a la cola de reproducción."""
         if not self._playing:
             return
+        self._last_active_at = time.monotonic()
         self._queue.put(data)
 
     def flush(self):
         """Vacía la cola y el buffer (para interrupciones)."""
         while not self._queue.empty():
-            self._queue.get()
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
         self._buffer.clear()
+        self._last_active_at = 0.0
 
     def stop(self):
         """Detiene la reproducción."""

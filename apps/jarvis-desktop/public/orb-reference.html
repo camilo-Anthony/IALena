@@ -1,0 +1,1523 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>NÚCLEO DE INTELIGENCIA ARTIFICIAL — PULSO 2100</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden; background: #000;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    user-select: none; -webkit-user-select: none;
+  }
+  #gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; z-index: 1; }
+
+  #hud-top-left {
+    position: fixed; top: 20px; left: 24px; z-index: 10; pointer-events: none;
+    color: #7adcff; font-size: 11px; letter-spacing: 3px; text-transform: uppercase;
+  }
+  #hud-top-left b { color: #00BFFF; font-size: 14px; }
+  #hud-top-left .sub {
+    color: #3b82a6; font-size: 9px; letter-spacing: 2px; margin-top: 4px; display: block;
+  }
+
+  #hud-status {
+    position: fixed; top: 20px; right: 24px; z-index: 10; pointer-events: none;
+    text-align: right; color: #80e0ff; font-size: 11px; letter-spacing: 3px;
+  }
+  #hud-status .badge {
+    display: inline-block; padding: 4px 10px; border-radius: 4px;
+    background: #00BFFF; color: #000; font-weight: bold;
+    transition: background 0.4s ease, color 0.4s ease;
+  }
+
+  #audio-bar-wrap {
+    display: flex; gap: 3px; align-items: flex-end; height: 16px; margin-top: 6px; justify-content: flex-end;
+  }
+  .bar { width: 3px; background: #00bfff; height: 30%; transition: height 0.1s ease; border-radius: 1px; }
+
+  #panel {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 10;
+    background: #000; border: 1px solid #00BFFF;
+    border-radius: 16px; padding: 14px 20px;
+    display: flex; flex-direction: column; gap: 10px; align-items: center;
+    max-width: 95vw;
+    transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s;
+  }
+  #panel.minimized { transform: translate(-50%, calc(100% + 20px)); opacity: 0; pointer-events: none; }
+
+  .panel-section-title {
+    color: #00BFFF; font-size: 9px; letter-spacing: 3px; text-transform: uppercase; margin-bottom: 2px;
+  }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
+  .btn {
+    background: #000; border: 1px solid #00BFFF;
+    color: #00BFFF; font-family: inherit; font-size: 10px; letter-spacing: 2px;
+    padding: 8px 14px; border-radius: 8px; cursor: pointer; transition: all 0.25s ease;
+    outline: none; text-transform: uppercase;
+  }
+  .btn:hover {
+    background: #00BFFF; border-color: #00BFFF;
+    color: #000;
+  }
+  .btn.active {
+    background: #00FFFF; border-color: #00FFFF;
+    color: #000; font-weight: bold;
+  }
+  .btn.active-cyan {
+    background: #60EFFF; border-color: #60EFFF;
+    color: #000; font-weight: bold;
+  }
+  .btn.active-red {
+    background: #FF4050; border-color: #FF4050;
+    color: #000; font-weight: bold;
+  }
+
+  .layer-btn { font-size: 9px; padding: 5px 10px; border-radius: 6px; }
+
+  #toggle-panel-btn {
+    position: fixed; bottom: 20px; right: 20px; z-index: 11; width: 42px; height: 42px;
+    background: #000; border: 1px solid #00BFFF;
+    color: #00FFFF; border-radius: 12px; font-size: 18px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.25s ease;
+  }
+  #toggle-panel-btn:hover { background: #00BFFF; color: #000; }
+
+  #mic-btn {
+    position: fixed; bottom: 20px; left: 20px; z-index: 11; height: 42px; padding: 0 14px;
+    background: #000; border: 1px solid #00BFFF;
+    color: #00FFFF; border-radius: 12px; font-family: inherit; font-size: 10px; letter-spacing: 2px;
+    cursor: pointer; display: flex; align-items: center; gap: 8px;
+    transition: all 0.25s ease;
+  }
+  #mic-btn:hover { background: #00BFFF; color: #000; }
+  #mic-btn.active { border-color: #60EFFF; color: #60EFFF; }
+  .mic-dot { width: 8px; height: 8px; border-radius: 50%; background: #00BFFF; }
+  #mic-btn.active .mic-dot { background: #60EFFF; animation: pulseMic 1s infinite alternate; }
+
+  /* --- MODO JARVIS: indicador de pipeline mínimo --- */
+  #pipeline {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 9;
+    color: #1f5f7a; font-size: 9px; letter-spacing: 3px; text-transform: uppercase;
+    pointer-events: none; display: flex; gap: 6px; align-items: center; white-space: nowrap;
+  }
+  #pipeline .seg { opacity: 0.35; transition: all 0.6s ease; }
+  #pipeline .seg.on { color: #00BFFF; opacity: 1; }
+  #pipeline .arrow { color: #12384a; }
+
+  /* Ocultar todo: modo pantalla limpia */
+  body.minimal #hud-top-left,
+  body.minimal #hud-status,
+  body.minimal #panel,
+  body.minimal #mic-btn,
+  body.minimal #toggle-panel-btn { display: none; }
+  body.minimal #pipeline { opacity: 0.8; }
+
+  #ui-btn {
+    position: fixed; bottom: 72px; right: 20px; z-index: 12; width: 34px; height: 34px;
+    background: #000; border: 1px solid #00BFFF; color: #00BFFF; border-radius: 8px;
+    font-size: 12px; cursor: pointer; transition: all 0.25s ease;
+  }
+  #ui-btn:hover { background: #00BFFF; color: #000; }
+
+  @keyframes pulseMic { from { opacity: 0.4; } to { opacity: 1; } }
+
+  @media (max-width: 768px) {
+    #hud-top-left { font-size: 9px; top: 14px; left: 14px; }
+    #hud-status { top: 14px; right: 14px; font-size: 9px; }
+    #panel { padding: 10px 12px; gap: 6px; }
+    .btn { font-size: 9px; padding: 6px 10px; }
+    .layer-btn { font-size: 8px; padding: 4px 8px; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="gl"></canvas>
+
+<div id="hud-top-left">
+  PULSO <b>//</b> NÚCLEO DE IA
+  <span class="sub">ARQUITECTURA CUÁNTICA V2100</span>
+</div>
+
+<div id="hud-status">
+  <span id="status-badge" class="badge">REPOSO</span>
+  <div id="audio-bar-wrap">
+    <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+    <div class="bar"></div><div class="bar"></div>
+  </div>
+</div>
+
+<button id="mic-btn">
+  <div class="mic-dot"></div>
+  <span id="mic-lbl">MICRÓFONO</span>
+</button>
+
+<div id="panel">
+  <div class="panel-section-title">ESTADOS DE LA IA</div>
+  <div class="btn-row" id="state-btns"></div>
+
+  <div class="panel-section-title">CAPAS HOLOGRÁFICAS (7)</div>
+  <div class="btn-row" id="layer-btns"></div>
+</div>
+
+<button id="toggle-panel-btn">⚙</button>
+
+<div id="pipeline">
+  <span class="seg" data-stage="presencia">PRESENCIA</span><span class="arrow">▸</span>
+  <span class="seg" data-stage="percepcion">PERCEPCIÓN</span><span class="arrow">▸</span>
+  <span class="seg" data-stage="cognicion">COGNICIÓN</span><span class="arrow">▸</span>
+  <span class="seg" data-stage="accion">ACCIÓN</span><span class="arrow">▸</span>
+  <span class="seg" data-stage="respuesta">RESPUESTA</span>
+</div>
+
+<button id="ui-btn" title="Modo pantalla limpia">◈</button>
+
+<script>
+  window.addEventListener('error', function (e) {
+    var el = document.getElementById('err-box');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'err-box';
+      el.style.cssText = 'position:fixed;bottom:10px;left:10px;right:10px;z-index:99999;background:rgba(0,0,0,.9);color:#ff4050;font:11px monospace;padding:8px;border:1px solid #ff4050;white-space:pre-wrap;';
+      document.body.appendChild(el);
+    }
+    el.textContent = 'ERROR: ' + e.message + '\n' + (e.filename || '') + ':' + (e.lineno || 0);
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var el = document.getElementById('err-box');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'err-box';
+      el.style.cssText = 'position:fixed;bottom:10px;left:10px;right:10px;z-index:99999;background:rgba(0,0,0,.9);color:#ff4050;font:11px monospace;padding:8px;border:1px solid #ff4050;white-space:pre-wrap;';
+      document.body.appendChild(el);
+    }
+    el.textContent = 'PROMESA: ' + (e.reason && e.reason.message ? e.reason.message : String(e.reason));
+  });
+</script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+// --- CONFIG & CONSTANTS ---
+const IS_MOBILE = window.innerWidth < 768;
+const PARTICLE_COUNT = IS_MOBILE ? 4500 : 8000;
+const SYNAPSE_COUNT = IS_MOBILE ? 220 : 380;
+const DUST_COUNT = IS_MOBILE ? 350 : 600;
+const SPARK_COUNT = 80;
+const FILAMENT_COUNT = 6;
+const FILAMENT_PTS = 24;
+
+// Colors
+const COLOR_BLUE_PRIMARY = new THREE.Color('#00BFFF');  // Azul eléctrico (REPOSO)
+const COLOR_CYAN_SECONDARY = new THREE.Color('#00FFFF'); // Cian brillante (acentos)
+const COLOR_GOLD = new THREE.Color('#FFC93C');           // Dorado (ESCUCHANDO)
+const COLOR_VIOLET_ACCENT = new THREE.Color('#9D7BFF');  // Violeta (PENSANDO)
+const COLOR_CYAN_VOICE = new THREE.Color('#60EFFF');     // Celeste Eléctrico (HABLANDO)
+const COLOR_RED_EXEC = new THREE.Color('#FF4050');       // Rojo (EJECUTANDO)
+const COLOR_WHITE_CORE = new THREE.Color('#FFFFFF');     // Pure White
+
+// States definition
+const STATES = {
+  reposo: {
+    name: 'REPOSO',
+    color: COLOR_BLUE_PRIMARY,
+    scaleMult: 1.0,
+    rotSpeed: 0.015,
+    pulseRate: 3.2,
+    bloomMult: 1.0,
+    synapseDensity: 0.4,
+    orbitSpeedMult: 1.0,
+    vibration: 0.0,
+  },
+  escuchando: {
+    name: 'ESCUCHANDO',
+    color: COLOR_GOLD,
+    scaleMult: 0.94,
+    rotSpeed: 0.025,
+    pulseRate: 1.5,
+    bloomMult: 1.15,
+    synapseDensity: 0.6,
+    orbitSpeedMult: 1.3,
+    vibration: 0.8,
+  },
+  pensando: {
+    name: 'PENSANDO',
+    color: COLOR_VIOLET_ACCENT,
+    scaleMult: 1.06,
+    rotSpeed: 0.05,
+    pulseRate: 0.7,
+    bloomMult: 1.25,
+    synapseDensity: 1.0,
+    orbitSpeedMult: 1.8,
+    vibration: 0.3,
+  },
+  hablando: {
+    name: 'HABLANDO',
+    color: COLOR_CYAN_VOICE,
+    scaleMult: 1.05,
+    rotSpeed: 0.02,
+    pulseRate: 0.4,
+    bloomMult: 1.2,
+    synapseDensity: 0.7,
+    orbitSpeedMult: 1.2,
+    vibration: 0.5,
+  },
+  ejecutando: {
+    name: 'EJECUTANDO',
+    color: COLOR_RED_EXEC,
+    scaleMult: 1.15,
+    rotSpeed: 0.09,
+    pulseRate: 0.3,
+    bloomMult: 1.35,
+    synapseDensity: 0.9,
+    orbitSpeedMult: 2.8,
+    vibration: 1.2,
+  }
+};
+
+let currentMode = 'reposo';
+const layerVisibility = {
+  1: true, // Core
+  2: true, // Particle sphere
+  3: true, // Neural connections
+  4: true, // Orbital rings
+  5: true, // Filaments
+  6: true, // Multi-layer Halo
+  7: true, // Ambient free particles
+};
+
+// Target and active color interpolated smoothly
+const activeColor = new THREE.Color().copy(COLOR_BLUE_PRIMARY);
+const targetColor = new THREE.Color().copy(COLOR_BLUE_PRIMARY);
+
+// --- RENDERER, SCENE, CAMERA ---
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_MOBILE ? 1.25 : 1.75));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.85;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#000000');
+
+const camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 0.2, IS_MOBILE ? 6.8 : 5.0);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.rotateSpeed = 0.6;
+controls.enableZoom = true;
+controls.minDistance = 3.0;
+controls.maxDistance = 10.0;
+controls.enablePan = false;
+
+// Main 3D Container
+const aiCoreGroup = new THREE.Group();
+scene.add(aiCoreGroup);
+
+// --- POSTPROCESSING (Bloom & Chromatic Aberration) ---
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.0,
+  0.8,
+  1.0
+);
+
+const chromaticShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uDistortion: { value: 0.0025 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float uDistortion;
+    varying vec2 vUv;
+    void main() {
+      vec2 uv = vUv;
+      vec2 dist = (uv - 0.5) * uDistortion;
+      float r = texture2D(tDiffuse, uv + dist).r;
+      float g = texture2D(tDiffuse, uv).g;
+      float b = texture2D(tDiffuse, uv - dist).b;
+      float d = length(uv - 0.5);
+      float vign = smoothstep(0.85, 0.2, d);
+      gl_FragColor = vec4(vec3(r, g, b) * (0.8 + 0.2 * vign), 1.0);
+    }
+  `
+};
+const chromaPass = new ShaderPass(chromaticShader);
+composer.addPass(chromaPass);
+composer.addPass(new OutputPass());
+
+// --- PROCEDURAL TEXTURES FOR GLOW SPRITES ---
+function createGlowTexture(size = 256, innerColor = 'rgba(255,255,255,1)', outerColor = 'rgba(0,191,255,0)') {
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const grad = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  grad.addColorStop(0, innerColor);
+  grad.addColorStop(0.3, innerColor.replace('1)', '0.6)').replace('1.0)', '0.6)'));
+  grad.addColorStop(1, outerColor);
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(c);
+}
+
+const texCoreGlow = createGlowTexture(512, 'rgba(255,255,255,1.0)', 'rgba(0,191,255,0)');
+const texSoftGlow = createGlowTexture(256, 'rgba(120,230,255,0.4)', 'rgba(0,191,255,0)');
+const texHaloFar = createGlowTexture(512, 'rgba(0,191,255,0.15)', 'rgba(0,30,80,0)');
+
+// ============================================================================
+// CAPA 1 — NÚCLEO (Core - Pure Concentrated Energy)
+// ============================================================================
+const layer1Group = new THREE.Group();
+aiCoreGroup.add(layer1Group);
+
+const coreShaderMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uColorCore: { value: COLOR_WHITE_CORE },
+    uColorCyan: { value: COLOR_CYAN_SECONDARY.clone() },
+    uColorMain: { value: activeColor },
+    uPulse: { value: 0.0 },
+    uIntensity: { value: 1.0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    varying vec3 vNormal;
+    varying vec3 vViewPosition;
+    varying vec3 vWorldPosition;
+    uniform float uTime;
+    uniform float uPulse;
+
+    void main() {
+      vNormal = normalize(normalMatrix * normal);
+      vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+      vWorldPosition = worldPosition.xyz;
+      vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+      vViewPosition = -mvPosition.xyz;
+
+      float p = sin(position.x * 6.0 + uTime * 3.0) * cos(position.y * 6.0 + uTime * 2.5) * sin(position.z * 6.0 + uTime * 3.5);
+      vec3 displacedPos = position + normal * (p * 0.02 + uPulse * 0.06);
+
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(displacedPos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColorCore;
+    uniform vec3 uColorCyan;
+    uniform vec3 uColorMain;
+    uniform float uPulse;
+    uniform float uIntensity;
+    uniform float uTime;
+
+    varying vec3 vNormal;
+    varying vec3 vViewPosition;
+    varying vec3 vWorldPosition;
+
+    void main() {
+      vec3 normal = normalize(vNormal);
+      vec3 viewDir = normalize(vViewPosition);
+
+      float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.5);
+      float centerGlow = pow(max(dot(normal, viewDir), 0.0), 4.0);
+
+      float noise = sin(vWorldPosition.x * 12.0 + uTime * 4.0) * sin(vWorldPosition.y * 12.0 + uTime * 3.0) * sin(vWorldPosition.z * 12.0 + uTime * 5.0);
+      noise = noise * 0.5 + 0.5;
+
+      vec3 col = uColorMain;
+      col = mix(col, uColorCore, centerGlow * 0.6);
+
+      float alpha = (0.9 + centerGlow * 0.6) * uIntensity;
+      col *= (1.3 + centerGlow * 0.8);
+
+      gl_FragColor = vec4(col, min(alpha, 1.0));
+    }
+  `
+});
+
+const coreMesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.52, 3), coreShaderMat);
+layer1Group.add(coreMesh);
+
+const coreSpriteMat = new THREE.SpriteMaterial({
+  map: texCoreGlow,
+  blending: THREE.AdditiveBlending,
+  transparent: true,
+  depthWrite: false
+});
+const coreSprite = new THREE.Sprite(coreSpriteMat);
+coreSprite.scale.setScalar(1.35);
+coreSprite.visible = false;
+layer1Group.add(coreSprite);
+
+// ============================================================================
+// CAPA 2 — ESFERA ENERGÉTICA (Light Dust Particles)
+// ============================================================================
+const layer2Group = new THREE.Group();
+aiCoreGroup.add(layer2Group);
+
+const cloudPositions = new Float32Array(PARTICLE_COUNT * 3);
+const cloudDirections = new Float32Array(PARTICLE_COUNT * 3);
+const cloudSizes = new Float32Array(PARTICLE_COUNT);
+const cloudSeeds = new Float32Array(PARTICLE_COUNT);
+
+{
+  const goldenRatio = (1 + Math.sqrt(5)) / 2;
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const theta = 2 * Math.PI * i / goldenRatio;
+    const phi = Math.acos(1 - 2 * (i + 0.5) / PARTICLE_COUNT);
+    const rad = 0.88 + Math.pow(Math.random(), 1.5) * 0.44;
+
+    const dx = Math.sin(phi) * Math.cos(theta);
+    const dy = Math.cos(phi);
+    const dz = Math.sin(phi) * Math.sin(theta);
+
+    cloudDirections[i * 3] = dx;
+    cloudDirections[i * 3 + 1] = dy;
+    cloudDirections[i * 3 + 2] = dz;
+
+    cloudPositions[i * 3] = dx * rad;
+    cloudPositions[i * 3 + 1] = dy * rad;
+    cloudPositions[i * 3 + 2] = dz * rad;
+
+    cloudSizes[i] = 0.012 + Math.pow(Math.random(), 3.0) * 0.095;
+    cloudSeeds[i] = Math.random() * 100.0;
+  }
+}
+
+const cloudGeo = new THREE.BufferGeometry();
+cloudGeo.setAttribute('position', new THREE.BufferAttribute(cloudPositions, 3).setUsage(THREE.DynamicDrawUsage));
+cloudGeo.setAttribute('aSize', new THREE.BufferAttribute(cloudSizes, 1));
+cloudGeo.setAttribute('aSeed', new THREE.BufferAttribute(cloudSeeds, 1));
+
+const cloudShaderMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uColor: { value: activeColor },
+    uVibration: { value: 0.0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float aSize;
+    attribute float aSeed;
+    uniform float uTime;
+    uniform float uVibration;
+    uniform vec3 uColor;
+
+    varying float vAlpha;
+    varying float vSize;
+
+    void main() {
+      vec3 pos = position;
+
+      float floatAngle = uTime * (0.2 + 0.3 * sin(aSeed)) + aSeed;
+      pos.x += sin(floatAngle) * 0.025;
+      pos.y += cos(floatAngle * 0.8) * 0.025;
+      pos.z += sin(floatAngle * 1.2) * 0.025;
+
+      if (uVibration > 0.01) {
+        pos += vec3(
+          sin(uTime * 30.0 + aSeed) * 0.02 * uVibration,
+          cos(uTime * 25.0 + aSeed * 1.5) * 0.02 * uVibration,
+          sin(uTime * 28.0 + aSeed * 2.0) * 0.02 * uVibration
+        );
+      }
+
+      vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+      gl_Position = projectionMatrix * mvPosition;
+
+      float twinkle = 0.4 + 0.6 * sin(uTime * (1.5 + sin(aSeed)) + aSeed * 6.28);
+      vAlpha = twinkle;
+
+      gl_PointSize = aSize * (1.0 + twinkle * 0.4) * (380.0 / -mvPosition.z);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    varying float vAlpha;
+
+    void main() {
+      vec2 coord = gl_PointCoord - vec2(0.5);
+      float dist = length(coord) * 2.0;
+      if (dist > 1.0) discard;
+
+      float coreGlow = smoothstep(1.0, 0.0, dist);
+      coreGlow = pow(coreGlow, 1.8);
+
+      vec3 col = mix(vec3(1.0), uColor, dist * 0.7);
+      gl_FragColor = vec4(col * 1.25, coreGlow * vAlpha * 0.7);
+    }
+  `
+});
+
+const particleCloud = new THREE.Points(cloudGeo, cloudShaderMat);
+layer2Group.add(particleCloud);
+
+// ============================================================================
+// CAPA 3 — RED NEURONAL (Dynamic Synapse Line Connections)
+// ============================================================================
+const layer3Group = new THREE.Group();
+aiCoreGroup.add(layer3Group);
+
+const synapsePositions = new Float32Array(SYNAPSE_COUNT * 6);
+const synapseAlphas = new Float32Array(SYNAPSE_COUNT * 2);
+
+const synapsePairs = [];
+for (let i = 0; i < SYNAPSE_COUNT; i++) {
+  const pA = Math.floor(Math.random() * PARTICLE_COUNT);
+  let pB = Math.floor(Math.random() * PARTICLE_COUNT);
+  while (pA === pB) pB = Math.floor(Math.random() * PARTICLE_COUNT);
+
+  synapsePairs.push({
+    a: pA, b: pB,
+    life: Math.random(),
+    maxLife: 1.0 + Math.random() * 2.0,
+    speed: 0.3 + Math.random() * 0.7
+  });
+}
+
+const synapseGeo = new THREE.BufferGeometry();
+synapseGeo.setAttribute('position', new THREE.BufferAttribute(synapsePositions, 3).setUsage(THREE.DynamicDrawUsage));
+synapseGeo.setAttribute('aAlpha', new THREE.BufferAttribute(synapseAlphas, 1).setUsage(THREE.DynamicDrawUsage));
+
+const synapseShaderMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uColor: { value: activeColor },
+    uTime: { value: 0 }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float aAlpha;
+    varying float vAlpha;
+    void main() {
+      vAlpha = aAlpha;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    varying float vAlpha;
+    void main() {
+      gl_FragColor = vec4(uColor * 1.2, vAlpha * 0.4);
+    }
+  `
+});
+
+const synapseLines = new THREE.LineSegments(synapseGeo, synapseShaderMat);
+layer3Group.add(synapseLines);
+
+const pulsePos = new Float32Array(SYNAPSE_COUNT * 3);
+const pulseAlpha = new Float32Array(SYNAPSE_COUNT);
+const pulseGeo = new THREE.BufferGeometry();
+pulseGeo.setAttribute('position', new THREE.BufferAttribute(pulsePos, 3).setUsage(THREE.DynamicDrawUsage));
+pulseGeo.setAttribute('aAlpha', new THREE.BufferAttribute(pulseAlpha, 1).setUsage(THREE.DynamicDrawUsage));
+const pulseMat = new THREE.ShaderMaterial({
+  uniforms: { uColor: { value: new THREE.Color(0xffffff) }, uBoost: { value: 1 } },
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float aAlpha;
+    uniform float uBoost;
+    varying float vA;
+    void main() {
+      vA = aAlpha * uBoost;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = 0.055 * vA * (300.0 / max(0.1, -mv.z));
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    uniform vec3 uColor;
+    varying float vA;
+    void main() {
+      float d = length(gl_PointCoord - vec2(0.5)) * 2.0;
+      if (d > 1.0) discard;
+      gl_FragColor = vec4(uColor * 2.2, (1.0 - d) * vA);
+    }`,
+});
+const synapsePulses = new THREE.Points(pulseGeo, pulseMat);
+layer3Group.add(synapsePulses);
+
+// ============================================================================
+// CAPA 4 — ANILLOS ORBITALES (7 Holographic Orbits + Traveling Data Packets)
+// ============================================================================
+const layer4Group = new THREE.Group();
+aiCoreGroup.add(layer4Group);
+
+const orbitConfigs = [
+  { radius: 1.15, tube: 0.007, rotX: 0.25, rotY: 0.1,  speed: 0.012, calm: 0.30, color: COLOR_BLUE_PRIMARY, opacity: 0.65 },
+  { radius: 1.42, tube: 0.005, rotX: 1.15, rotY: -0.4, speed: -0.016, calm: 0.08, color: COLOR_CYAN_SECONDARY, opacity: 0.55 },
+  { radius: 1.70, tube: 0.009, rotX: -0.5, rotY: 0.8,  speed: 0.009, calm: 0.55, color: COLOR_VIOLET_ACCENT, opacity: 0.70 },
+  { radius: 1.95, tube: 0.004, rotX: 0.9,  rotY: 0.3,  speed: -0.022, calm: 0.12, color: COLOR_BLUE_PRIMARY, opacity: 0.50 },
+  { radius: 2.20, tube: 0.006, rotX: -1.2, rotY: -0.7, speed: 0.014, calm: 0.40, color: COLOR_CYAN_SECONDARY, opacity: 0.60 },
+  { radius: 2.45, tube: 0.008, rotX: 0.45, rotY: 1.1,  speed: -0.010, calm: 0.05, color: COLOR_VIOLET_ACCENT, opacity: 0.45 },
+  { radius: 2.70, tube: 0.005, rotX: -0.8, rotY: 0.2,  speed: 0.018, calm: 0.70, color: COLOR_BLUE_PRIMARY, opacity: 0.40 },
+];
+
+const orbitRings = [];
+
+orbitConfigs.forEach((cfg) => {
+  const ringGroup = new THREE.Group();
+  ringGroup.rotation.x = cfg.rotX;
+  ringGroup.rotation.y = cfg.rotY;
+
+  const ringGeo = new THREE.TorusGeometry(cfg.radius, cfg.tube, 8, 160);
+  const ringMat = new THREE.MeshBasicMaterial({
+    color: cfg.color,
+    transparent: true,
+    opacity: cfg.opacity,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+  const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+  ringGroup.add(ringMesh);
+  const ringMaterials = [ringMat];
+
+  const ghostGeo = new THREE.TorusGeometry(cfg.radius, cfg.tube * 0.5, 6, 120);
+  const ghostMat = new THREE.MeshBasicMaterial({
+    color: cfg.color,
+    transparent: true,
+    opacity: cfg.opacity * 0.3,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+  const ghostMesh = new THREE.Mesh(ghostGeo, ghostMat);
+  ghostMesh.scale.setScalar(1.02);
+  ringGroup.add(ghostMesh);
+  ringMaterials.push(ghostMat);
+
+  const packetSpriteMat = new THREE.SpriteMaterial({
+    map: texCoreGlow,
+    color: cfg.color,
+    blending: THREE.AdditiveBlending,
+    transparent: true,
+    depthWrite: false
+  });
+  const packetSprite = new THREE.Sprite(packetSpriteMat);
+  packetSprite.scale.setScalar(0.18);
+  ringGroup.add(packetSprite);
+
+  const trailLength = 16;
+  const trailPositions = new Float32Array(trailLength * 3);
+  const trailAlphas = new Float32Array(trailLength);
+  for (let t = 0; t < trailLength; t++) {
+    trailAlphas[t] = Math.pow((trailLength - t) / trailLength, 2.0) * 0.8;
+  }
+  const trailGeo = new THREE.BufferGeometry();
+  trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+  trailGeo.setAttribute('aAlpha', new THREE.BufferAttribute(trailAlphas, 1));
+
+  const trailMat = new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: cfg.color.clone() } },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexShader: `
+      attribute float aAlpha;
+      varying float vAlpha;
+      void main() {
+        vAlpha = aAlpha;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      varying float vAlpha;
+      void main() { gl_FragColor = vec4(uColor * 1.4, vAlpha); }
+    `
+  });
+  const trailLine = new THREE.Line(trailGeo, trailMat);
+  ringGroup.add(trailLine);
+
+  layer4Group.add(ringGroup);
+
+  orbitRings.push({
+    group: ringGroup,
+    ringMesh,
+    packetSprite,
+    trailLine,
+    trailPositions,
+    ringMaterials,
+    cfg,
+    angle: Math.random() * Math.PI * 2,
+    packetSpeed: 1.2 + Math.random() * 1.8
+  });
+});
+
+// ============================================================================
+// CAPA 5 — FILAMENTOS DE ENERGÍA (Magnetic Field Ribbons / Curves)
+// ============================================================================
+const layer5Group = new THREE.Group();
+aiCoreGroup.add(layer5Group);
+
+const filaments = [];
+for (let i = 0; i < FILAMENT_COUNT; i++) {
+  const positions = new Float32Array(FILAMENT_PTS * 3);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
+
+  const mat = new THREE.LineBasicMaterial({
+    color: (i % 2 === 0) ? COLOR_CYAN_SECONDARY : COLOR_VIOLET_ACCENT,
+    transparent: true,
+    opacity: 0.45,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+
+  const line = new THREE.Line(geo, mat);
+  layer5Group.add(line);
+
+  filaments.push({
+    line,
+    geo,
+    positions,
+    index: i,
+    speed: 0.35 + i * 0.12,
+    phase: Math.random() * Math.PI * 2
+  });
+}
+
+// ============================================================================
+// CAPA 6 — HALO MULTICAPA (3 Concentric Breathing Glow Halos)
+// ============================================================================
+const layer6Group = new THREE.Group();
+aiCoreGroup.add(layer6Group);
+
+const haloCloseMat = new THREE.SpriteMaterial({
+  map: texSoftGlow,
+  color: COLOR_CYAN_SECONDARY,
+  blending: THREE.AdditiveBlending,
+  transparent: true,
+  opacity: 0.2,
+  depthWrite: false
+});
+const haloClose = new THREE.Sprite(haloCloseMat);
+haloClose.scale.setScalar(3.2);
+haloClose.visible = false;
+layer6Group.add(haloClose);
+
+const haloMidMat = new THREE.SpriteMaterial({
+  map: texHaloFar,
+  color: COLOR_BLUE_PRIMARY,
+  blending: THREE.AdditiveBlending,
+  transparent: true,
+  opacity: 0.05,
+  depthWrite: false
+});
+const haloMid = new THREE.Sprite(haloMidMat);
+haloMid.scale.setScalar(5.6);
+haloMid.visible = false;
+layer6Group.add(haloMid);
+
+const haloOuterMat = new THREE.SpriteMaterial({
+  map: texHaloFar,
+  color: COLOR_BLUE_PRIMARY,
+  blending: THREE.AdditiveBlending,
+  transparent: true,
+  opacity: 0.03,
+  depthWrite: false
+});
+const haloOuter = new THREE.Sprite(haloOuterMat);
+haloOuter.scale.setScalar(9.2);
+haloOuter.visible = false;
+layer6Group.add(haloOuter);
+
+// ============================================================================
+// CAPA 7 — PARTÍCULAS LIBRES (Ambient Free Floating Space Dust)
+// ============================================================================
+const layer7Group = new THREE.Group();
+aiCoreGroup.add(layer7Group);
+
+const dustPos = new Float32Array(DUST_COUNT * 3);
+const dustBasePos = new Float32Array(DUST_COUNT * 3);
+const dustPhases = new Float32Array(DUST_COUNT);
+
+for (let i = 0; i < DUST_COUNT; i++) {
+  const rad = 2.4 + Math.random() * 2.8;
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1);
+
+  const x = rad * Math.sin(phi) * Math.cos(theta);
+  const y = rad * Math.cos(phi) * 0.7;
+  const z = rad * Math.sin(phi) * Math.sin(theta);
+
+  dustBasePos[i * 3] = x;
+  dustBasePos[i * 3 + 1] = y;
+  dustBasePos[i * 3 + 2] = z;
+
+  dustPos[i * 3] = x;
+  dustPos[i * 3 + 1] = y;
+  dustPos[i * 3 + 2] = z;
+
+  dustPhases[i] = Math.random() * Math.PI * 2;
+}
+
+const dustGeo = new THREE.BufferGeometry();
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3).setUsage(THREE.DynamicDrawUsage));
+
+const dustShaderMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uColor: { value: activeColor }
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    uniform float uTime;
+    varying float vAlpha;
+    void main() {
+      vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mvPosition;
+
+      float dist = length(position);
+      vAlpha = smoothstep(5.0, 2.5, dist) * smoothstep(1.8, 2.4, dist);
+      gl_PointSize = 0.038 * (320.0 / -mvPosition.z);
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    varying float vAlpha;
+    void main() {
+      float d = length(gl_PointCoord - vec2(0.5)) * 2.0;
+      if (d > 1.0) discard;
+      float a = pow(1.0 - d, 2.0);
+      gl_FragColor = vec4(uColor * 1.1, a * vAlpha * 0.5);
+    }
+  `
+});
+
+const dustParticles = new THREE.Points(dustGeo, dustShaderMat);
+layer7Group.add(dustParticles);
+
+// ============================================================================
+// EXTRAS: SPARKS FOR EXECUTION & ACTION MODE
+// ============================================================================
+const sparkPos = new Float32Array(SPARK_COUNT * 3);
+const sparkVel = new Float32Array(SPARK_COUNT * 3);
+const sparkLife = new Float32Array(SPARK_COUNT);
+const sparkAlphas = new Float32Array(SPARK_COUNT);
+
+for (let i = 0; i < SPARK_COUNT; i++) sparkLife[i] = -1.0;
+
+const sparkGeo = new THREE.BufferGeometry();
+sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPos, 3).setUsage(THREE.DynamicDrawUsage));
+sparkGeo.setAttribute('aAlpha', new THREE.BufferAttribute(sparkAlphas, 1).setUsage(THREE.DynamicDrawUsage));
+
+const sparkShaderMat = new THREE.ShaderMaterial({
+  uniforms: { uColor: { value: new THREE.Color('#FF4050') } },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  vertexShader: `
+    attribute float aAlpha;
+    varying float vAlpha;
+    void main() {
+      vAlpha = aAlpha;
+      vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = 0.06 * aAlpha * (300.0 / -mvPosition.z);
+      gl_Position = projectionMatrix * mvPosition;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uColor;
+    varying float vAlpha;
+    void main() {
+      float d = length(gl_PointCoord - vec2(0.5)) * 2.0;
+      if (d > 1.0) discard;
+      gl_FragColor = vec4(uColor * 1.5, (1.0 - d) * vAlpha);
+    }
+  `
+});
+
+const sparkPoints = new THREE.Points(sparkGeo, sparkShaderMat);
+aiCoreGroup.add(sparkPoints);
+
+function spawnSpark() {
+  for (let i = 0; i < SPARK_COUNT; i++) {
+    if (sparkLife[i] <= 0) {
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      const speed = 1.2 + Math.random() * 2.2;
+
+      sparkPos[i * 3] = Math.sin(phi) * Math.cos(theta) * 0.5;
+      sparkPos[i * 3 + 1] = Math.cos(phi) * 0.5;
+      sparkPos[i * 3 + 2] = Math.sin(phi) * Math.sin(theta) * 0.5;
+
+      sparkVel[i * 3] = Math.sin(phi) * Math.cos(theta) * speed;
+      sparkVel[i * 3 + 1] = Math.cos(phi) * speed;
+      sparkVel[i * 3 + 2] = Math.sin(phi) * Math.sin(theta) * speed;
+
+      sparkLife[i] = 0.5 + Math.random() * 0.5;
+      break;
+    }
+  }
+}
+
+// ============================================================================
+// SISTEMA DE REACCIONES POR ACCIÓN
+// ============================================================================
+const sweepGeo = new THREE.RingGeometry(0.35, 1.75, 48, 1, 0, Math.PI * 0.5);
+const sweepMat = new THREE.MeshBasicMaterial({
+  color: COLOR_CYAN_SECONDARY,
+  transparent: true, opacity: 0.12, blending: THREE.AdditiveBlending,
+  depthWrite: false, side: THREE.DoubleSide,
+});
+const sweepMesh = new THREE.Mesh(sweepGeo, sweepMat);
+sweepMesh.rotation.x = Math.PI / 2;
+sweepMesh.visible = false;
+aiCoreGroup.add(sweepMesh);
+
+const scanBandMat = new THREE.MeshBasicMaterial({
+  color: COLOR_CYAN_SECONDARY,
+  transparent: true, opacity: 0.32, blending: THREE.AdditiveBlending,
+  depthWrite: false, side: THREE.DoubleSide,
+});
+const scanBand = new THREE.Mesh(new THREE.RingGeometry(0.3, 1.28, 64, 1), scanBandMat);
+scanBand.rotation.x = Math.PI / 2;
+scanBand.visible = false;
+aiCoreGroup.add(scanBand);
+const scanGhostMat = new THREE.MeshBasicMaterial({
+  color: COLOR_VIOLET_ACCENT,
+  transparent: true, opacity: 0.14, blending: THREE.AdditiveBlending,
+  depthWrite: false, side: THREE.DoubleSide,
+});
+const scanGhost = new THREE.Mesh(new THREE.RingGeometry(0.4, 1.36, 64, 1), scanGhostMat);
+scanGhost.rotation.x = Math.PI / 2;
+scanGhost.visible = false;
+aiCoreGroup.add(scanGhost);
+
+const EXT_MOTION = { reposo: 0.5, escuchando: 0.8, pensando: 0.15, hablando: 0.7, ejecutando: 1.2 };
+let extMotion = 1.0;
+let tiltCurrent = 0, tiltTarget = 0, tiltTimer = 0;
+let filSpeedFactor = 1.0;
+
+const REACT_RINGS = 14;
+const reactPool = [];
+const reactActive = [];
+for (let i = 0; i < REACT_RINGS; i++) {
+  const mat = new THREE.MeshBasicMaterial({
+    color: COLOR_BLUE_PRIMARY,
+    transparent: true,
+    opacity: 0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const m = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.004, 6, 96), mat);
+  m.visible = false;
+  aiCoreGroup.add(m);
+  reactPool.push(m);
+}
+
+let spinBoost = 0;
+let coreFlicker = 0;
+let cloudFocus = 1;
+let coreDisplace = 0;
+let freqEnergy = 0;
+let compress = 1;
+
+// ============================================================================
+// AUDIO & MICROPHONE ANALYZER
+// ============================================================================
+let audioCtx = null, analyser = null, micStream = null;
+let micDataArray = null;
+let isMicActive = false;
+
+async function toggleMicrophone() {
+  const micBtn = document.getElementById('mic-btn');
+  const micLbl = document.getElementById('mic-lbl');
+
+  if (isMicActive) {
+    if (micStream) micStream.getTracks().forEach(t => t.stop());
+    isMicActive = false;
+    micBtn.classList.remove('active');
+    micLbl.textContent = 'MICRÓFONO';
+    if (currentMode === 'escuchando') setAIState('reposo');
+    return;
+  }
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(micStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 128;
+    source.connect(analyser);
+    micDataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    isMicActive = true;
+    micBtn.classList.add('active');
+    micLbl.textContent = 'MIC EN VIVO';
+    setAIState('escuchando');
+  } catch (err) {
+    alert('No se pudo acceder al micrófono: ' + err.message);
+  }
+}
+
+function getAudioVolume() {
+  if (isMicActive && analyser && micDataArray) {
+    analyser.getByteFrequencyData(micDataArray);
+    let sum = 0;
+    for (let i = 0; i < micDataArray.length; i++) sum += micDataArray[i];
+    return sum / (micDataArray.length * 255);
+  }
+  return 0;
+}
+
+function getHighFreqEnergy() {
+  if (isMicActive && analyser && micDataArray) {
+    const n = micDataArray.length;
+    const start = Math.floor(n * 0.55);
+    let sum = 0;
+    for (let i = start; i < n; i++) sum += micDataArray[i];
+    return sum / ((n - start) * 255);
+  }
+  return 0;
+}
+
+// ============================================================================
+// ANIMATION & STATE SYSTEM
+// ============================================================================
+const clock = new THREE.Clock();
+let corePulseVal = 0;
+let simAudio = 0;
+
+const TRANSITIONS = {
+  reposo:     [['asentarse', 0.7]],
+  escuchando: [['despertar', 0.45], ['sensores', 0.55]],
+  pensando:   [['radarApagar', 0.4], ['concentrar', 0.5], ['escaneo', 0.35]],
+  hablando:   [['escaneoApagar', 0.4], ['expandir', 0.4], ['primeraOnda', 0.2]],
+  ejecutando: [['concentracion', 0.35], ['carga', 0.45], ['liberacion', 0.15]],
+};
+let trans = null;
+let transT = 1;
+let execSustain = 0;
+
+function firePhase(name) {}
+
+function startTransition(toKey) {
+  const phases = TRANSITIONS[toKey] || [];
+  const total = phases.reduce((a, p) => a + p[1], 0);
+  trans = { to: toKey, phases, idx: 0, t: 0, total };
+  transT = 0;
+  if (phases.length > 0) firePhase(phases[0][0]);
+}
+
+function setAIState(modeKey) {
+  if (!STATES[modeKey]) return;
+  currentMode = modeKey;
+  startTransition(modeKey);
+  if (modeKey !== 'ejecutando') execSustain = 0;
+  updatePipeline(modeKey);
+
+  const st = STATES[modeKey];
+  targetColor.copy(st.color);
+
+  const badge = document.getElementById('status-badge');
+  badge.textContent = st.name;
+  if (modeKey === 'ejecutando') {
+    badge.style.background = '#FF4050';
+  } else {
+    badge.style.background = '#00BFFF';
+  }
+
+  document.querySelectorAll('#state-btns .btn').forEach(btn => {
+    btn.classList.remove('active', 'active-cyan', 'active-red');
+    if (btn.dataset.mode === modeKey) {
+      btn.classList.add(modeKey === 'ejecutando' ? 'active-red' : 'active');
+    }
+  });
+}
+
+function calculateOrganicBreathing(time) {
+  return 1.0 + 0.015 * (Math.sin(time * 0.8) + 0.5 * Math.sin(time * 1.9));
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const delta = Math.min(clock.getDelta(), 0.05);
+  const time = clock.getElapsedTime();
+  const stateCfg = STATES[currentMode];
+
+  controls.update();
+
+  activeColor.lerp(targetColor, delta * 2.5);
+
+  const audioVol = getAudioVolume();
+  let effectiveAudio = isMicActive ? audioVol * 3.0 : 0.0;
+  if (!isMicActive && (currentMode === 'hablando' || currentMode === 'escuchando')) {
+    simAudio += (Math.random() - simAudio) * 0.14;
+    if (simAudio < 0.06) simAudio = 0.06;
+    effectiveAudio = simAudio * (currentMode === 'hablando' ? 2.4 : 1.3);
+  }
+  freqEnergy += ((isMicActive ? getHighFreqEnergy() * 2.2 : effectiveAudio * 0.35) - freqEnergy) * (1 - Math.exp(-delta * 4));
+  freqEnergy = Math.max(0, freqEnergy);
+
+  corePulseVal = 0;
+
+  if (trans) {
+    trans.t += delta;
+    while (trans.phases[trans.idx] && trans.t > trans.phases[trans.idx][1]) {
+      trans.t -= trans.phases[trans.idx][1];
+      trans.idx++;
+      if (trans.phases[trans.idx]) firePhase(trans.phases[trans.idx][0]);
+    }
+    transT = Math.min(1, (trans.t + trans.phases.slice(0, trans.idx).reduce((a, p) => a + p[1], 0)) / trans.total);
+    if (trans.idx >= trans.phases.length) { trans = null; transT = 1; }
+  } else {
+    transT += (1 - transT) * (1 - Math.exp(-delta * 2.5));
+  }
+  if (currentMode === 'ejecutando') execSustain += delta;
+
+  const compressGoal = currentMode === 'escuchando' ? 0.93 : 1.0;
+  compress += (compressGoal - compress) * (1 - Math.exp(-delta * 2.5));
+  const organicScale = calculateOrganicBreathing(time) * stateCfg.scaleMult * compress
+    * (1.0 + effectiveAudio * 0.15);
+  aiCoreGroup.scale.setScalar(organicScale);
+
+  extMotion += (EXT_MOTION[currentMode] - extMotion) * (1 - Math.exp(-delta * 2));
+  aiCoreGroup.rotation.y += delta * 0.03 * extMotion * (1.0 + stateCfg.rotSpeed * 2.0 + spinBoost * 2.5);
+  aiCoreGroup.rotation.x = Math.sin(time * 0.08) * 0.03 * extMotion;
+
+  tiltTimer -= delta;
+  if (tiltTimer <= 0) {
+    tiltTarget = (Math.random() - 0.5) * 1.5;
+    tiltTimer = 2.5 + Math.random() * 2.5;
+  }
+  const tiltGoal = currentMode === 'escuchando' ? tiltTarget : 0;
+  tiltCurrent += (tiltGoal - tiltCurrent) * (1 - Math.exp(-delta * 1.3));
+  aiCoreGroup.rotation.z = tiltCurrent;
+
+  const dispGoal = currentMode === 'escuchando' ? 0.11 : 0;
+  coreDisplace += (dispGoal - coreDisplace) * (1 - Math.exp(-delta * 2.0));
+  const dx = Math.sin(tiltCurrent) * coreDisplace;
+  const dz = Math.cos(tiltCurrent) * coreDisplace;
+  coreMesh.position.set(dx, 0, dz);
+  coreSprite.position.set(dx, 0, dz);
+
+  coreShaderMat.uniforms.uTime.value = time;
+  coreShaderMat.uniforms.uPulse.value = effectiveAudio + coreFlicker * 0.8;
+  coreShaderMat.uniforms.uColorMain.value.copy(activeColor);
+
+  coreSprite.scale.setScalar((1.35 + corePulseVal * 0.35 + effectiveAudio * 0.45) * organicScale);
+  coreSpriteMat.opacity = 0.6;
+  coreSpriteMat.color.copy(activeColor);
+
+  bloomPass.strength = 0.0;
+
+  cloudShaderMat.uniforms.uTime.value = time;
+  cloudShaderMat.uniforms.uColor.value.copy(activeColor);
+  cloudShaderMat.uniforms.uVibration.value = stateCfg.vibration + effectiveAudio * 2.0 + freqEnergy * 1.2;
+  const focusTarget = currentMode === 'escuchando' ? 0.85 : 1.0;
+  cloudFocus += (focusTarget - cloudFocus) * (1 - Math.exp(-delta * 2.2));
+  particleCloud.scale.setScalar(cloudFocus * (currentMode === 'hablando' ? 1 + effectiveAudio * 0.015 : 1));
+  particleCloud.rotation.y += delta * stateCfg.rotSpeed * extMotion * (1 + spinBoost * 3);
+  particleCloud.rotation.x += delta * stateCfg.rotSpeed * extMotion * 0.4;
+
+  const connPositionsAttr = synapseGeo.attributes.position;
+  const connAlphasAttr = synapseGeo.attributes.aAlpha;
+
+  function pickInnerParticle() {
+    for (let t = 0; t < 12; t++) {
+      const idx = Math.floor(Math.random() * PARTICLE_COUNT);
+      const d = idx * 3;
+      const r = Math.sqrt(cloudPositions[d] ** 2 + cloudPositions[d + 1] ** 2 + cloudPositions[d + 2] ** 2);
+      if (r < 0.6) return idx;
+    }
+    return Math.floor(Math.random() * PARTICLE_COUNT);
+  }
+  function pickOuterParticle() {
+    for (let t = 0; t < 12; t++) {
+      const idx = Math.floor(Math.random() * PARTICLE_COUNT);
+      const d = idx * 3;
+      const r = Math.sqrt(cloudPositions[d] ** 2 + cloudPositions[d + 1] ** 2 + cloudPositions[d + 2] ** 2);
+      if (r > 0.85) return idx;
+    }
+    return Math.floor(Math.random() * PARTICLE_COUNT);
+  }
+
+  for (let i = 0; i < SYNAPSE_COUNT; i++) {
+    const syn = synapsePairs[i];
+    syn.life += delta * syn.speed * (currentMode === 'pensando' ? 2.5 : 1.0);
+    if (syn.life >= syn.maxLife) {
+      syn.life = 0;
+      if (currentMode === 'pensando') {
+        syn.a = pickInnerParticle();
+        syn.b = pickOuterParticle();
+      } else {
+        syn.a = Math.floor(Math.random() * PARTICLE_COUNT);
+        syn.b = Math.floor(Math.random() * PARTICLE_COUNT);
+      }
+    }
+
+    const pA = syn.a * 3, pB = syn.b * 3;
+    const o = i * 6;
+
+    synapsePositions[o]     = cloudPositions[pA];
+    synapsePositions[o + 1] = cloudPositions[pA + 1];
+    synapsePositions[o + 2] = cloudPositions[pA + 2];
+
+    synapsePositions[o + 3] = cloudPositions[pB];
+    synapsePositions[o + 4] = cloudPositions[pB + 1];
+    synapsePositions[o + 5] = cloudPositions[pB + 2];
+
+    const progress = syn.life / syn.maxLife;
+    const fade = Math.sin(progress * Math.PI) * stateCfg.synapseDensity;
+    synapseAlphas[i * 2]     = fade;
+    synapseAlphas[i * 2 + 1] = fade;
+
+    const pi = i * 3;
+    pulsePos[pi]     = synapsePositions[o]     + (synapsePositions[o + 3]     - synapsePositions[o])     * progress;
+    pulsePos[pi + 1] = synapsePositions[o + 1] + (synapsePositions[o + 4] - synapsePositions[o + 1]) * progress;
+    pulsePos[pi + 2] = synapsePositions[o + 2] + (synapsePositions[o + 5] - synapsePositions[o + 2]) * progress;
+    pulseAlpha[i] = fade * (currentMode === 'pensando' ? 1.0 : 0.35);
+  }
+  connPositionsAttr.needsUpdate = true;
+  connAlphasAttr.needsUpdate = true;
+  synapseShaderMat.uniforms.uColor.value.copy(activeColor);
+  pulseGeo.attributes.position.needsUpdate = true;
+  pulseGeo.attributes.aAlpha.needsUpdate = true;
+  pulseMat.uniforms.uBoost.value = currentMode === 'pensando' ? 1.0 : 0.4;
+  pulseMat.uniforms.uColor.value.copy(activeColor);
+
+  const ringCalm = currentMode === 'reposo' ? 0.35 : 1.0;
+  orbitRings.forEach((orb) => {
+    for (const m of orb.ringMaterials) m.color.copy(activeColor);
+    orb.packetSprite.material.color.copy(activeColor);
+    orb.trailLine.material.uniforms.uColor.value.copy(activeColor);
+    const calmK = ringCalm === 1.0 ? 1.0 : orb.cfg.calm;
+    orb.group.rotation.z += delta * orb.cfg.speed * stateCfg.orbitSpeedMult * extMotion * calmK;
+
+    orb.angle += delta * orb.packetSpeed * stateCfg.orbitSpeedMult * calmK;
+    const px = Math.cos(orb.angle) * orb.cfg.radius;
+    const py = Math.sin(orb.angle) * orb.cfg.radius;
+    orb.packetSprite.position.set(px, py, 0);
+
+    const trailAttr = orb.trailLine.geometry.attributes.position;
+    for (let t = orb.trailPositions.length / 3 - 1; t > 0; t--) {
+      orb.trailPositions[t * 3]     = orb.trailPositions[(t - 1) * 3];
+      orb.trailPositions[t * 3 + 1] = orb.trailPositions[(t - 1) * 3 + 1];
+      orb.trailPositions[t * 3 + 2] = orb.trailPositions[(t - 1) * 3 + 2];
+    }
+    orb.trailPositions[0] = px;
+    orb.trailPositions[1] = py;
+    orb.trailPositions[2] = 0;
+    trailAttr.needsUpdate = true;
+  });
+
+  const filBase = currentMode === 'pensando' ? 0.3 : currentMode === 'ejecutando' ? 1.4 : 1.0;
+  filSpeedFactor += ((filBase + freqEnergy * (currentMode === 'hablando' ? 1.3 : 0)) - filSpeedFactor) * (1 - Math.exp(-delta * 2));
+  filaments.forEach((fil) => {
+    fil.line.material.color.copy(activeColor);
+    fil.line.material.opacity = (fil.index % 2 === 0 ? 0.38 : 0.26) * (0.7 + 0.3 * extMotion);
+    const attr = fil.geo.attributes.position;
+    const pos = fil.positions;
+    const filSpeed = time * fil.speed * filSpeedFactor + fil.phase;
+
+    for (let k = 0; k < FILAMENT_PTS; k++) {
+      const u = k / (FILAMENT_PTS - 1);
+      const angle = u * Math.PI * 2 + filSpeed;
+      const rad = 1.05 + 0.45 * Math.sin(u * Math.PI * 3 + filSpeed * 0.8);
+      const height = 0.6 * Math.sin(u * Math.PI * 2 + filSpeed * 0.5);
+
+      pos[k * 3]     = Math.cos(angle) * rad;
+      pos[k * 3 + 1] = height;
+      pos[k * 3 + 2] = Math.sin(angle) * rad;
+    }
+    attr.needsUpdate = true;
+  });
+
+  const haloBreath = 1.0 + 0.04 * Math.sin(time * 0.8) + 0.02 * Math.sin(time * 1.7) + effectiveAudio * 0.15;
+  haloClose.scale.setScalar(3.2 * haloBreath);
+  haloMid.scale.setScalar(5.6 * haloBreath);
+  haloOuter.scale.setScalar(9.2 * haloBreath);
+
+  haloCloseMat.color.copy(activeColor);
+  haloMidMat.color.copy(activeColor);
+
+  const dustPosAttr = dustGeo.attributes.position;
+  for (let i = 0; i < DUST_COUNT; i++) {
+    const b = i * 3;
+    const ph = dustPhases[i];
+    const dr = 1.0 + 0.08 * Math.sin(time * 0.3 + ph);
+
+    dustPos[b]     = dustBasePos[b] * dr + Math.sin(time * 0.2 + ph) * 0.08;
+    dustPos[b + 1] = dustBasePos[b + 1] * dr + Math.cos(time * 0.25 + ph) * 0.08;
+    dustPos[b + 2] = dustBasePos[b + 2] * dr;
+  }
+  dustPosAttr.needsUpdate = true;
+  dustShaderMat.uniforms.uColor.value.copy(activeColor);
+
+  spinBoost = Math.max(0, spinBoost - delta * 0.5);
+  coreFlicker = Math.max(0, coreFlicker - delta * 1.2);
+  const swirl = currentMode === 'ejecutando' ? 5 : 1;
+  for (let i = reactActive.length - 1; i >= 0; i--) {
+    const r = reactActive[i];
+    r.life += delta;
+    const p = r.life / r.maxLife;
+    if (p >= 1) {
+      r.mesh.visible = false;
+      reactActive.splice(i, 1);
+      continue;
+    }
+    const e = 1 - Math.pow(1 - p, 3);
+    r.mesh.scale.setScalar(1 + e * r.grow);
+    r.mesh.rotation.z += r.rotZ * swirl * delta;
+    r.mesh.material.opacity = Math.pow(1 - p, 2.2) * 0.55;
+  }
+
+  sweepMesh.visible = false;
+  scanBand.visible = false;
+  scanGhost.visible = false;
+  for (let i = reactActive.length - 1; i >= 0; i--) {
+    reactActive[i].mesh.visible = false;
+    reactActive.splice(i, 1);
+  }
+
+  const sparkPosAttr = sparkGeo.attributes.position;
+  const sparkAlphaAttr = sparkGeo.attributes.aAlpha;
+  sparkShaderMat.uniforms.uColor.value.copy(activeColor);
+
+  for (let i = 0; i < SPARK_COUNT; i++) {
+    if (sparkLife[i] > 0) {
+      sparkLife[i] -= delta;
+      const dist = Math.max(0.15, Math.sqrt(sparkPos[i*3]**2 + sparkPos[i*3+1]**2 + sparkPos[i*3+2]**2));
+      const pull = (currentMode === 'ejecutando' ? 1.6 : 0.6) / dist;
+      sparkVel[i * 3]     -= sparkPos[i * 3]     * pull * delta;
+      sparkVel[i * 3 + 1] -= sparkPos[i * 3 + 1] * pull * delta;
+      sparkVel[i * 3 + 2] -= sparkPos[i * 3 + 2] * pull * delta;
+      sparkPos[i * 3]     += sparkVel[i * 3]     * delta;
+      sparkPos[i * 3 + 1] += sparkVel[i * 3 + 1] * delta;
+      sparkPos[i * 3 + 2] += sparkVel[i * 3 + 2] * delta;
+      sparkAlphas[i] = Math.max(0.0, sparkLife[i] / 0.5);
+    } else {
+      sparkAlphas[i] = 0.0;
+    }
+  }
+  sparkPosAttr.needsUpdate = true;
+  sparkAlphaAttr.needsUpdate = true;
+
+  layer1Group.visible = layerVisibility[1];
+  layer2Group.visible = layerVisibility[2];
+  layer3Group.visible = layerVisibility[3];
+  layer4Group.visible = layerVisibility[4];
+  layer5Group.visible = layerVisibility[5];
+  layer6Group.visible = layerVisibility[6];
+  layer7Group.visible = layerVisibility[7];
+
+  if (isMicActive) {
+    const bars = document.querySelectorAll('#audio-bar-wrap .bar');
+    bars.forEach((b, idx) => {
+      const val = micDataArray ? micDataArray[idx * 3] / 255 : Math.random();
+      b.style.height = `${Math.max(15, val * 100)}%`;
+    });
+  }
+
+  composer.render();
+}
+
+function initUI() {
+  const stateContainer = document.getElementById('state-btns');
+  Object.keys(STATES).forEach(key => {
+    const btn = document.createElement('button');
+    btn.className = `btn ${key === currentMode ? 'active' : ''}`;
+    btn.textContent = STATES[key].name;
+    btn.dataset.mode = key;
+    btn.onclick = () => setAIState(key);
+    stateContainer.appendChild(btn);
+  });
+
+  const layerContainer = document.getElementById('layer-btns');
+  const layerNames = [
+    '1. NÚCLEO',
+    '2. ESFERA',
+    '3. RED NEURONAL',
+    '4. ÓRBITAS',
+    '5. FILAMENTOS',
+    '6. HALO',
+    '7. POLVO'
+  ];
+
+  layerNames.forEach((name, idx) => {
+    const layerNum = idx + 1;
+    const btn = document.createElement('button');
+    btn.className = 'btn layer-btn active';
+    btn.textContent = name;
+    btn.onclick = () => {
+      layerVisibility[layerNum] = !layerVisibility[layerNum];
+      btn.classList.toggle('active', layerVisibility[layerNum]);
+    };
+    layerContainer.appendChild(btn);
+  });
+
+  const toggleBtn = document.getElementById('toggle-panel-btn');
+  const panel = document.getElementById('panel');
+  toggleBtn.onclick = () => panel.classList.toggle('minimized');
+
+  document.getElementById('mic-btn').onclick = toggleMicrophone;
+
+  document.getElementById('ui-btn').onclick = () => {
+    document.body.classList.toggle('minimal');
+  };
+}
+
+const STAGE_MAP = {
+  reposo: 'presencia',
+  escuchando: 'percepcion',
+  pensando: 'cognicion',
+  ejecutando: 'accion',
+  hablando: 'respuesta',
+};
+function updatePipeline(modeKey) {
+  const stage = STAGE_MAP[modeKey];
+  document.querySelectorAll('#pipeline .seg').forEach(seg => {
+    seg.classList.toggle('on', seg.dataset.stage === stage);
+  });
+}
+
+window.addEventListener('resize', () => {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
+  bloomPass.setSize(w, h);
+});
+
+initUI();
+setAIState('reposo');
+animate();
+</script>
+</body>
+</html>

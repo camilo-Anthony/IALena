@@ -24,6 +24,35 @@ _log_buffer: deque[dict[str, Any]] = deque(maxlen=_LOG_MAXLEN)
 _log_lock = Lock()
 
 
+def _sanitize_json_obj(obj: Any) -> Any:
+    """Sanitiza recursivamente cualquier objeto para garantizar compatibilidad con JSON/FastAPI."""
+    if obj is None or isinstance(obj, (str, bool, int)):
+        return obj
+    if isinstance(obj, float):
+        return obj
+    # Soporte para tipos numpy o escalares con .item() o .tolist()
+    if hasattr(obj, "item") and callable(obj.item):
+        try:
+            return _sanitize_json_obj(obj.item())
+        except Exception:
+            pass
+    if hasattr(obj, "tolist") and callable(obj.tolist):
+        try:
+            return _sanitize_json_obj(obj.tolist())
+        except Exception:
+            pass
+    if isinstance(obj, dict):
+        return {str(k): _sanitize_json_obj(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set, deque)):
+        return [_sanitize_json_obj(item) for item in obj]
+    try:
+        if isinstance(obj, (int, float)):
+            return float(obj)
+    except Exception:
+        pass
+    return str(obj)
+
+
 def append_log(level: str, message: str, source: str = "kernel") -> None:
     """Añade una entrada al buffer circular de logs en tiempo real."""
     entry = {
@@ -40,7 +69,7 @@ def get_logs(n: int = 100) -> list[dict[str, Any]]:
     """Retorna los últimos n logs del buffer (más recientes al final)."""
     with _log_lock:
         entries = list(_log_buffer)
-    return entries[-n:]
+    return _sanitize_json_obj(entries[-n:])
 
 
 def register_kernel(kernel: "JarvisKernel") -> None:
@@ -113,21 +142,21 @@ def get_status() -> dict[str, Any]:
     uptime = round(time.time() - _start_time, 1)
 
     if _kernel is None:
-        return {
+        return _sanitize_json_obj({
             "orb_state": orb_state,
             "uptime_seconds": uptime,
             "kernel_ready": False,
             "live_connected": False,
             "hermes_slow_ready": False,
             "hermes_fast_ready": False,
-        }
+        })
 
     try:
         router = _kernel.action_router
         task_payload = router.task_status_payload()
         key_status = _get_key_rotator_status()
 
-        return {
+        return _sanitize_json_obj({
             "orb_state": orb_state,
             "uptime_seconds": uptime,
             "kernel_ready": True,
@@ -138,14 +167,15 @@ def get_status() -> dict[str, Any]:
             "tasks": task_payload,
             "key_rotator": key_status,
             "delivery_queue": _get_delivery_queue_status(),
-        }
+            "wake_word": _get_wake_word_status(),
+        })
     except Exception as exc:
-        return {
+        return _sanitize_json_obj({
             "orb_state": "error",
             "uptime_seconds": uptime,
             "kernel_ready": True,
             "error": str(exc),
-        }
+        })
 
 
 def _get_live_connected() -> bool:
@@ -195,6 +225,21 @@ def _get_delivery_queue_status() -> dict[str, Any]:
         return {"pending": 0, "delivering": 0}
 
 
+def _get_wake_word_status() -> dict[str, Any]:
+    if _kernel is None:
+        return {"enabled": False, "ready": False}
+    try:
+        pipeline = getattr(_kernel, "audio_pipeline", None)
+        if pipeline and hasattr(pipeline, "get_metrics"):
+            return pipeline.get_metrics()
+        detector = getattr(_kernel, "wake_word_detector", None)
+        if detector and hasattr(detector, "get_metrics"):
+            return detector.get_metrics()
+        return {"enabled": False, "ready": False}
+    except Exception:
+        return {"enabled": False, "ready": False}
+
+
 # ── Capabilities ───────────────────────────────────────────────────────────
 
 def get_capabilities() -> dict[str, Any]:
@@ -205,10 +250,10 @@ def get_capabilities() -> dict[str, Any]:
         cap.value for cap in TaskCapability
         if capability_registry.has_capability("slow", cap)
     ]
-    return {
+    return _sanitize_json_obj({
         "registry": snapshot,
         "active_capabilities": active_caps,
-    }
+    })
 
 
 # ── Tasks ──────────────────────────────────────────────────────────────────
@@ -219,24 +264,50 @@ def get_tasks() -> dict[str, Any]:
         return {"running": [], "pending": [], "recent": []}
     try:
         ledger = _kernel.task_ledger
-        return {
+        return _sanitize_json_obj({
             "running_slow": [_task_to_dict(t) for t in ledger.running_tasks("slow_hermes")],
             "running_fast": [_task_to_dict(t) for t in ledger.running_tasks("fast_hermes")],
             "pending_slow": [_task_to_dict(t) for t in ledger.pending_tasks("slow_hermes")],
             "recent": [_task_to_dict(t) for t in ledger.recent_tasks(10)],
-        }
+        })
     except Exception as exc:
         return {"error": str(exc)}
 
 
 def _task_to_dict(task: Any) -> dict[str, Any]:
+    created_at = getattr(task, "created_at", 0)
+    completed_at = getattr(task, "completed_at", 0)
+    duration = round(completed_at - created_at, 1) if (completed_at and created_at) else None
     return {
         "task_id": getattr(task, "task_id", ""),
         "lane": getattr(task, "lane", ""),
-        "prompt": getattr(task, "prompt", "")[:120],  # truncar para seguridad
+        "prompt": getattr(task, "prompt", ""),
         "state": getattr(task, "state", ""),
-        "created_at": getattr(task, "created_at", 0),
+        "result": getattr(task, "result_text", "") or getattr(task, "result", "") or "",
+        "error": getattr(task, "error", "") or "",
+        "created_at": created_at,
+        "completed_at": completed_at,
+        "duration": duration,
     }
+
+
+async def dispatch_hermes_task(prompt: str, lane: str = "slow") -> dict[str, Any]:
+    """Despacha una tarea a Hermes desde la API."""
+    if _kernel is None or not hasattr(_kernel, "action_router"):
+        return {"status": "error", "message": "Kernel no inicializado"}
+    return await _kernel.action_router.dispatch_direct_task(prompt, lane=lane)
+
+
+def get_scheduler_and_sentinel_status() -> dict[str, Any]:
+    """Estado de los subsistemas autónomos (Hermes Cron y Sentinel)."""
+    if _kernel is None:
+        return {"scheduler": None, "sentinel": None}
+    sched = getattr(_kernel, "hermes_scheduler", None)
+    sent = getattr(_kernel, "system_sentinel", None)
+    return _sanitize_json_obj({
+        "scheduler": sched.get_status() if sched and hasattr(sched, "get_status") else None,
+        "sentinel": sent.get_status() if sent and hasattr(sent, "get_status") else None,
+    })
 
 
 # ── Hermes config (read-only) ──────────────────────────────────────────────
@@ -248,22 +319,104 @@ def get_hermes_mcps() -> dict[str, Any]:
         from pathlib import Path
         config_path = Path.home() / ".hermes" / "config.yaml"
         if not config_path.exists():
-            return {"mcps": [], "config_path": str(config_path), "found": False}
+            return _sanitize_json_obj({"mcps": [], "config_path": str(config_path), "found": False})
         with open(config_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         mcps_raw = data.get("mcp_servers", {})
         mcps = []
         for name, cfg in mcps_raw.items():
+            enabled = cfg.get("enabled", True)
+            if isinstance(enabled, str):
+                enabled = enabled.lower() not in {"false", "0", "off"}
             mcps.append({
                 "name": name,
                 "command": cfg.get("command", ""),
                 "args": cfg.get("args", []),
                 "url": cfg.get("url", ""),
                 "timeout": cfg.get("timeout", 300),
+                "enabled": enabled,
+                "env": cfg.get("env", {}),
             })
-        return {"mcps": mcps, "config_path": str(config_path), "found": True}
+        return _sanitize_json_obj({"mcps": mcps, "config_path": str(config_path), "found": True})
     except Exception as exc:
-        return {"mcps": [], "error": str(exc)}
+        return _sanitize_json_obj({"mcps": [], "error": str(exc)})
+
+
+def save_hermes_mcp(name: str, mcp_config: dict[str, Any]) -> dict[str, Any]:
+    """Agrega o actualiza un servidor MCP en ~/.hermes/config.yaml."""
+    try:
+        import yaml
+        from pathlib import Path
+        config_dir = Path.home() / ".hermes"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / "config.yaml"
+        data = {}
+        if config_path.exists():
+            with open(config_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        servers = data.setdefault("mcp_servers", {})
+        entry: dict[str, Any] = {}
+        if mcp_config.get("url"):
+            entry["url"] = str(mcp_config["url"]).strip()
+        if mcp_config.get("command"):
+            entry["command"] = str(mcp_config["command"]).strip()
+        if mcp_config.get("args"):
+            args = mcp_config["args"]
+            if isinstance(args, str):
+                args = [a.strip() for a in args.split() if a.strip()]
+            entry["args"] = args
+        if mcp_config.get("env") and isinstance(mcp_config["env"], dict):
+            entry["env"] = mcp_config["env"]
+        entry["enabled"] = bool(mcp_config.get("enabled", True))
+        servers[name] = entry
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+        return {"success": True, "name": name}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+def remove_hermes_mcp(name: str) -> dict[str, Any]:
+    """Elimina un servidor MCP de ~/.hermes/config.yaml."""
+    try:
+        import yaml
+        from pathlib import Path
+        config_path = Path.home() / ".hermes" / "config.yaml"
+        if not config_path.exists():
+            return {"success": False, "error": "config.yaml not found"}
+        with open(config_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        servers = data.get("mcp_servers", {})
+        if name in servers:
+            del servers[name]
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+            return {"success": True, "removed": name}
+        return {"success": False, "error": f"Servidor '{name}' no encontrado"}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+def toggle_hermes_mcp(name: str) -> dict[str, Any]:
+    """Alterna el estado enabled de un servidor MCP en ~/.hermes/config.yaml."""
+    try:
+        import yaml
+        from pathlib import Path
+        config_path = Path.home() / ".hermes" / "config.yaml"
+        if not config_path.exists():
+            return {"success": False, "error": "config.yaml not found"}
+        with open(config_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        servers = data.get("mcp_servers", {})
+        if name in servers:
+            current = servers[name].get("enabled", True)
+            servers[name]["enabled"] = not current
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+            return {"success": True, "enabled": not current}
+        return {"success": False, "error": f"Servidor '{name}' no encontrado"}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 def get_hermes_toolsets() -> dict[str, Any]:
@@ -271,10 +424,10 @@ def get_hermes_toolsets() -> dict[str, Any]:
     try:
         from src.adapters.brain.hermes_adapter import _read_runtime_config
         config = _read_runtime_config()
-        return {
+        return _sanitize_json_obj({
             "enabled": config.get("enabled_toolsets", []),
             "disabled": config.get("disabled_toolsets", []),
             "platform": config.get("platform", "cli"),
-        }
+        })
     except Exception as exc:
-        return {"enabled": [], "disabled": [], "error": str(exc)}
+        return _sanitize_json_obj({"enabled": [], "disabled": [], "error": str(exc)})

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mesa 3D Conceptual</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.3/p5.min.js"></script>
+  <style>
+    body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background: #1a1a1a; }
+  </style>
+</head>
+<body>
+<script>
+function setup() {
+  createCanvas(800, 600, WEBGL);
+}
+
+function draw() {
+  background(26);
+  orbitControl();
+  rotateX(-PI / 6);
+  rotateY(PI / 4);
+  
+  // Mesa
+  fill(139, 69, 19);
+  stroke(100, 40, 0);
+  
+  // Tablero
+  push();
+  translate(0, -50, 0);
+  box(300, 20, 200);
+  pop();
+  
+  // Patas
+  for(let x of [-120, 120]) {
+    for(let z of [-70, 70]) {
+      push();
+      translate(x, 30, z);
+      box(20, 100, 20);
+      pop();
+    }
+  }
+}
+</script>
+</body>
+</html>

@@ -125,6 +125,9 @@ class SessionMemoryConsolidator:
         if not self.enabled:
             return None
 
+        if not session.has_learning_signal():
+            return None
+
         transcript = session.transcript_text()
         if len(transcript.strip()) < self.min_chars:
             print(f"[SessionMemory] SessionMemory skipped_too_short session={session.session_id} len={len(transcript)}")

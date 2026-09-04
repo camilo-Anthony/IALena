@@ -4,103 +4,109 @@ import { useJarvisWS } from "./hooks/useJarvisWS";
 import { jarvisAPI } from "./hooks/useJarvisAPI";
 import { OrbView } from "./views/OrbView";
 import { PanelView } from "./views/PanelView";
-import { HermesView } from "./views/HermesView";
+
+// Helper para invocar comandos de Tauri de forma segura y eficiente
+async function invokeTauri(command: string, args: Record<string, unknown> = {}) {
+  try {
+    if (
+      typeof window !== "undefined" &&
+      ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+    ) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return await invoke(command, args);
+    }
+  } catch {
+    // Ignorar en entorno de desarrollo web convencional
+  }
+}
 
 export default function App() {
   const activeView = useJarvisStore((s) => s.activeView);
-  const setActiveView = useJarvisStore((s) => s.setActiveView);
   const setStatus = useJarvisStore((s) => s.setStatus);
   const setConfig = useJarvisStore((s) => s.setConfig);
+  const wsConnected = useJarvisStore((s) => s.wsConnected);
 
   // Iniciar la escucha del WebSocket de eventos en tiempo real
   useJarvisWS();
 
-  // Polling y carga inicial de status y config
+  // 1. Carga inicial y Polling Adaptativo (solo como respaldo cuando WebSocket esté desconectado)
   useEffect(() => {
+    let isMounted = true;
+
     async function loadInitial() {
       try {
         const [statusData, configData] = await Promise.all([
           jarvisAPI.getStatus(),
           jarvisAPI.getConfig(),
         ]);
-        setStatus(statusData);
-        setConfig(configData);
+        if (isMounted) {
+          setStatus(statusData);
+          setConfig(configData);
+        }
       } catch (e) {
         console.error("Error al cargar la info inicial de la API:", e);
       }
     }
     loadInitial();
 
-    // Mantener sincronizado el estado básico mediante polling cada 4 segundos
-    const t = setInterval(async () => {
+    // Si WebSocket está conectado, reducimos el polling a un heartbeat pasivo (20s)
+    // Si se desconecta, activamos polling frecuente de respaldo (4s)
+    const pollIntervalMs = wsConnected ? 20000 : 4000;
+    const timer = setInterval(async () => {
       try {
         const statusData = await jarvisAPI.getStatus();
-        setStatus(statusData);
-      } catch (e) {
-        // Ignorar fallos de red temporales
+        if (isMounted) setStatus(statusData);
+      } catch {
+        // Ignorar fallos temporales de red
       }
-    }, 4000);
+    }, pollIntervalMs);
 
-    return () => clearInterval(t);
-  }, [setStatus, setConfig]);
+    return () => {
+      isMounted = false;
+      clearInterval(timer);
+    };
+  }, [setStatus, setConfig, wsConnected]);
+
+  // 2. Notificar a Tauri el cambio de vista para gestión de ventana y click-through
+  useEffect(() => {
+    invokeTauri("set_active_view_state", { view: activeView });
+  }, [activeView]);
+
+  // 3. Atajos de teclado globales para navegación rápida
+  const setActiveView = useJarvisStore((s) => s.setActiveView);
+  const setActivePanelTab = useJarvisStore((s) => s.setActivePanelTab);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Escape: volver al Orbe desde cualquier vista
+      if (e.key === "Escape") {
+        setActiveView("orb");
+      }
+      // Alt+1 / Ctrl+1: Orb
+      if ((e.ctrlKey || e.altKey) && e.key === "1") {
+        e.preventDefault();
+        setActiveView("orb");
+      }
+      // Alt+2 / Ctrl+2: Panel Dashboard
+      if ((e.ctrlKey || e.altKey) && e.key === "2") {
+        e.preventDefault();
+        setActivePanelTab("dashboard");
+        setActiveView("panel");
+      }
+      // Alt+3 / Ctrl+3: Panel Hermes Cockpit
+      if ((e.ctrlKey || e.altKey) && e.key === "3") {
+        e.preventDefault();
+        setActivePanelTab("hermes");
+        setActiveView("panel");
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [setActiveView, setActivePanelTab]);
 
   return (
-    <div className={`w-screen h-screen flex flex-col overflow-hidden text-[#e0f4ff] font-sans select-none relative ${activeView === "orb" ? "bg-transparent" : "bg-[#020408]"}`}>
-      
-      {/* HUD Cabecera Global de Navegación (Auto-hide si estamos en el Orbe para el efecto transparente) */}
-      <header 
-        className={`absolute top-0 inset-x-0 h-12 border-b border-cyan-500/20 bg-slate-950/80 px-5 flex items-center justify-between z-50 shrink-0 transition-opacity duration-300 ${
-          activeView === "orb" ? "opacity-0 hover:opacity-100" : "opacity-100 relative"
-        }`}
-      >
-        <div className="flex items-center gap-2 cursor-pointer" onClick={() => setActiveView("orb")}>
-          <div className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-ping" />
-          <span className="font-mono text-sm tracking-[5px] text-cyan-300 font-bold">JARVIS</span>
-        </div>
-
-        {/* Botones de navegación de vistas principales */}
-        <div className="flex gap-2">
-          <button
-            onClick={() => setActiveView("orb")}
-            className={`px-4 py-1 text-xs font-mono tracking-widest rounded border transition cursor-pointer ${
-              activeView === "orb"
-                ? "bg-cyan-500/10 border-cyan-500/50 text-cyan-300 font-bold"
-                : "border-transparent text-slate-400 hover:text-cyan-400"
-            }`}
-          >
-            ORBE
-          </button>
-          <button
-            onClick={() => setActiveView("panel")}
-            className={`px-4 py-1 text-xs font-mono tracking-widest rounded border transition cursor-pointer ${
-              activeView === "panel"
-                ? "bg-cyan-500/10 border-cyan-500/50 text-cyan-300 font-bold"
-                : "border-transparent text-slate-400 hover:text-cyan-400"
-            }`}
-          >
-            PANEL
-          </button>
-          <button
-            onClick={() => setActiveView("hermes")}
-            className={`px-4 py-1 text-xs font-mono tracking-widest rounded border transition cursor-pointer ${
-              activeView === "hermes"
-                ? "bg-cyan-500/10 border-cyan-500/50 text-cyan-300 font-bold"
-                : "border-transparent text-slate-400 hover:text-cyan-400"
-            }`}
-          >
-            HERMES
-          </button>
-        </div>
-      </header>
-
-      {/* Contenedor principal de Vistas con destrucción condicional */}
-      <main className="flex-1 min-h-0 relative z-10 w-full h-full pointer-events-none">
-        <div className="pointer-events-auto w-full h-full p-4">
-          {activeView === "orb" && <OrbView />}
-          {activeView === "panel" && <PanelView />}
-          {activeView === "hermes" && <HermesView />}
-        </div>
-      </main>
+    <div className="w-screen h-screen overflow-hidden bg-transparent">
+      {activeView === "orb" ? <OrbView /> : <PanelView />}
     </div>
   );
 }

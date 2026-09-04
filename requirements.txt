@@ -6,9 +6,11 @@ google-genai
 # Hermes Agent (cerebro)
 python-dotenv
 
-# Audio
+# Audio y Wake Word
 pyaudio
-
+openwakeword>=0.6.0
+onnxruntime>=1.18.0
+numpy
 
 # Hermes-Agent package itself
 -e ./Hermes-Agent

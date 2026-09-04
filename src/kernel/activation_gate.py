@@ -30,7 +30,7 @@ class ActivationGate:
 
     def __init__(self, idle_sleep_seconds: float | None = None):
         self.idle_sleep_seconds = (
-            self._read_float_env("ACTIVATION_IDLE_SLEEP_SECONDS", 45.0)
+            self._read_float_env("ACTIVATION_IDLE_SLEEP_SECONDS", 30.0)
             if idle_sleep_seconds is None
             else max(0.0, idle_sleep_seconds)
         )
@@ -39,6 +39,8 @@ class ActivationGate:
         self.last_user_voice_at = 0.0
         self.last_state_change_at = time.monotonic()
         self.pending_wake_requests: list[WakeRequest] = []
+        self.last_wake_word_model = ""
+        self.last_wake_word_at = 0.0
 
     @staticmethod
     def _read_float_env(name: str, default: float) -> float:
@@ -58,6 +60,14 @@ class ActivationGate:
 
     def start_live_session(self, reason: str = "live_session_started") -> int:
         self.session_epoch += 1
+        # Si el usuario ya está activo o dijo la wake word hace poco, preservar ACTIVE
+        recent_wake = (time.time() - self.last_wake_word_at) < 15.0
+        recent_voice = (time.monotonic() - self.last_user_voice_at) < self.idle_sleep_seconds
+        if self.state == ActivationState.ACTIVE and (recent_wake or recent_voice):
+            return self.session_epoch
+        if recent_wake:
+            self._set_state(ActivationState.ACTIVE, "wake_word_preserved")
+            return self.session_epoch
         self._set_state(ActivationState.SILENT_RECONNECT, reason)
         return self.session_epoch
 
@@ -71,8 +81,14 @@ class ActivationGate:
             self._set_state(ActivationState.ACTIVE, reason)
 
     def mark_wake_word(self, phrase: str = "") -> None:
+        self.last_wake_word_model = phrase or "wake_word"
+        self.last_wake_word_at = time.time()
         reason = f"wake_word:{phrase}" if phrase else "wake_word"
         self.mark_user_voice(reason)
+
+    def touch_voice(self) -> None:
+        """Actualiza la marca temporal de voz activa sin cambiar de estado."""
+        self.last_user_voice_at = time.monotonic()
 
     def sleep_if_idle(self) -> bool:
         if self.state not in (
@@ -84,7 +100,8 @@ class ActivationGate:
         if self.idle_sleep_seconds <= 0:
             return False
         if self.state == ActivationState.DELIVERING:
-            reference = self.last_state_change_at
+            # Nunca dormir por inactividad mientras estemos entregando audio/respuesta
+            return False
         elif self.state == ActivationState.SILENT_RECONNECT:
             reference = self.last_user_voice_at or self.last_state_change_at
         else:
@@ -121,6 +138,8 @@ class ActivationGate:
         self._set_state(ActivationState.DELIVERING, "delivery")
 
     def finish_delivery(self) -> None:
+        self.last_user_voice_at = time.monotonic()
+        self.last_state_change_at = time.monotonic()
         if self.state == ActivationState.DELIVERING:
             self._set_state(ActivationState.ACTIVE, "delivery_finished")
 

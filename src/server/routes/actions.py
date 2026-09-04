@@ -66,8 +66,8 @@ def force_sleep():
 
 
 @router.post("/restart-voice")
-async def restart_voice():
-    """Reconecta el adaptador de voz Live sin reiniciar el kernel completo."""
+def restart_voice():
+    """Reconecta el adaptador de voz Live de forma segura sin colisiones de event loop."""
     kernel = get_kernel()
     if not kernel:
         raise HTTPException(status_code=503, detail="Kernel no registrado")
@@ -76,12 +76,11 @@ async def restart_voice():
         if va is None:
             raise HTTPException(status_code=503, detail="Voice assistant no instanciado")
         append_log("INFO", "Reinicio de voz solicitado desde UI", source="api")
-        # Detener la sesión actual y reconectar
-        if hasattr(va, "disconnect"):
-            await va.disconnect()
-        if hasattr(va, "connect"):
-            asyncio.create_task(va.connect())
-        return {"status": "ok", "message": "Reconexión de voz iniciada"}
+        if hasattr(va, "restart_session"):
+            va.restart_session()
+        else:
+            setattr(va, "_reconnect_requested", True)
+        return {"status": "ok", "message": "Reconexión de voz iniciada de forma segura"}
     except HTTPException:
         raise
     except Exception as exc:

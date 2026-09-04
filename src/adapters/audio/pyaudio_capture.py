@@ -13,7 +13,7 @@ from src.core.interfaces.audio import IAudioCapture
 
 FORMAT   = pyaudio.paInt16
 CHANNELS = 1
-CHUNK    = 1024
+CHUNK    = 512
 
 
 class PyAudioCapture(IAudioCapture):
@@ -37,6 +37,8 @@ class PyAudioCapture(IAudioCapture):
         self._voice_hangover_remaining = 0
         self._last_voice_monotonic = 0.0
         self._mic_debug_audio = os.getenv("MIC_DEBUG_AUDIO", "").lower() in {"1", "true", "yes", "on"}
+        self.gain = self._read_float_env("MIC_GAIN", 1.0)
+        self.muted = False
 
     @staticmethod
     def _read_int_env(name: str, default: int) -> int:
@@ -102,8 +104,6 @@ class PyAudioCapture(IAudioCapture):
         return silence
 
     def has_recent_voice(self, window_seconds: float | None = None) -> bool:
-        if not self.noise_gate_enabled:
-            return True
         window = self._recent_voice_window_seconds if window_seconds is None else window_seconds
         return (
             self._last_voice_monotonic > 0
@@ -146,6 +146,17 @@ class PyAudioCapture(IAudioCapture):
             print(f"[Micrófono] Error buscando dispositivo de entrada: {e}")
             return None
 
+    def _apply_gain(self, in_data: bytes) -> bytes:
+        if self.gain == 1.0 or not in_data:
+            return in_data
+        try:
+            import numpy as np
+            audio = np.frombuffer(in_data, dtype=np.int16).astype(np.float32)
+            audio = np.clip(audio * self.gain, -32768, 32767).astype(np.int16)
+            return audio.tobytes()
+        except Exception:
+            return in_data
+
     def start(self):
         """Abre el stream de entrada y comienza a capturar audio."""
         self._recording = True
@@ -153,7 +164,14 @@ class PyAudioCapture(IAudioCapture):
 
         def _callback(in_data, _frame_count, _time_info, _status):
             if self._recording:
-                in_data = self._apply_noise_gate(in_data)
+                if self.muted:
+                    in_data = b"\x00" * len(in_data)
+                else:
+                    in_data = self._apply_gain(in_data)
+                    in_data = self._apply_noise_gate(in_data)
+                    rms = self._rms(in_data)
+                    if rms > 150:
+                        self._last_voice_monotonic = time.monotonic()
 
                 try:
                     loop.call_soon_threadsafe(self._queue.put_nowait, in_data)
@@ -172,7 +190,8 @@ class PyAudioCapture(IAudioCapture):
             stream_callback=_callback,
         )
         self._stream.start_stream()
-        print(f"[Micrófono] Captura iniciada a {self.rate} Hz")
+        gain_str = f" (Ganancia={self.gain}x)" if self.gain != 1.0 else ""
+        print(f"[Micrófono] Captura iniciada a {self.rate} Hz{gain_str}")
 
     def stop(self):
         """Detiene la captura de audio."""
