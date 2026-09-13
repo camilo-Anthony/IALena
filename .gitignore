@@ -61,6 +61,7 @@ chroma/
 nul
 task_ledger.json
 trajectory_samples.jsonl
+text_*.json
 *.pptx
 *.png
 
