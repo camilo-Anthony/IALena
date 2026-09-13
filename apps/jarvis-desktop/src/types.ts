@@ -150,6 +150,39 @@ export interface HermesToolsets {
   platform: string;
 }
 
+export interface HermesContextDocument {
+  exists: boolean;
+  content: string;
+  updated_at: number | null;
+  error?: string;
+}
+
+export interface HermesMemoryPayload {
+  home_ready: boolean;
+  identity: HermesContextDocument;
+  user_memory: HermesContextDocument;
+  agent_memory: HermesContextDocument;
+}
+
+export interface HermesCronJob {
+  id: string;
+  name?: string;
+  prompt?: string;
+  schedule_display?: string;
+  state?: string;
+  enabled?: boolean;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
+  last_status?: string | null;
+  last_error?: string | null;
+}
+
+export interface HermesCronOutput {
+  name: string;
+  created_at: number;
+  content: string;
+}
+
 // WebSocket event types
 export interface WSEvent {
   type: "state_change" | "task_update" | "log_entry";

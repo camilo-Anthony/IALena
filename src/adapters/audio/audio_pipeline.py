@@ -88,6 +88,20 @@ class AudioPipeline(IAudioPipeline):
         if callable(reset_fn):
             reset_fn()
 
+    def discard_pending_audio(self, reason: str = "") -> int:
+        """Descarta PCM que quedó en cola al cerrar o recrear una sesión Live."""
+        discarded = 0
+        while True:
+            try:
+                self._active_queue.get_nowait()
+                discarded += 1
+            except asyncio.QueueEmpty:
+                break
+        self.ring_buffer.clear()
+        if discarded:
+            print(f"[AudioPipeline] Audio pendiente descartado: chunks={discarded} reason={reason or 'unspecified'}")
+        return discarded
+
     def start(self) -> None:
         """Inicia el hardware de captura y la tarea de procesamiento del pipeline."""
         if self._running:

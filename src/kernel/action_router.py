@@ -620,6 +620,7 @@ class ActionRouter:
             print(f"[ActionRouter] Error respondiendo tool call de estado de tareas: {exc}")
 
     async def save_user_memory_tool_call(self, call_id: str, name: str, args: dict, session) -> None:
+        """Delega memoria explícita a Hermes; JARVIS nunca escribe USER.md directamente."""
         contenido = str((args or {}).get("contenido") or (args or {}).get("texto") or "").strip()
         tipo = str((args or {}).get("tipo", "preferencia_personal")).strip()
         if not contenido:
@@ -638,42 +639,22 @@ class ActionRouter:
                     pass
             return
 
-        print(f"\033[92m[Memoria Persistente]\033[0m Guardando aprendizaje en USER.md: {contenido} (tipo={tipo})")
-        try:
-            from hermes_constants import get_hermes_home
-            home = get_hermes_home()
-        except Exception:
-            home = os.path.expanduser("~/.hermes")
+        prompt = (
+            "[MEMORIA EXPLICITA DEL USUARIO]\n"
+            "El usuario pidió que JARVIS recuerde el siguiente dato. Evalúa si es útil y persistente; "
+            "si lo es, guárdalo usando exclusivamente las herramientas de memoria de Hermes. "
+            "No crees una skill salvo que sea una regla de comportamiento estable y generalizable.\n"
+            f"TIPO_SUGERIDO: {tipo}\n"
+            f"DATO: {contenido}"
+        )
+        print(f"[ActionRouter] Memoria explícita delegada a Hermes: tipo={tipo}, chars={len(contenido)}")
 
-        memories_dir = os.path.join(str(home), "memories")
-        os.makedirs(memories_dir, exist_ok=True)
-        user_md_path = os.path.join(memories_dir, "USER.md")
+        if self.can_accept_lane(TaskLane.SLOW_HERMES) and self.reserve_tool_call():
+            asyncio.create_task(self.run_hermes(call_id, name, prompt))
+            return
 
-        # Leer archivo existente para no duplicar
-        existing_text = ""
-        if os.path.exists(user_md_path):
-            try:
-                with open(user_md_path, "r", encoding="utf-8") as f:
-                    existing_text = f.read()
-            except Exception as read_exc:
-                print(f"[ActionRouter] Error leyendo USER.md: {read_exc}")
-
-        entry = f"- [{tipo}] {contenido}"
-        if entry not in existing_text and contenido not in existing_text:
-            try:
-                with open(user_md_path, "a", encoding="utf-8") as f:
-                    if existing_text and not existing_text.endswith("\n"):
-                        f.write("\n")
-                    f.write(f"\n§\n{entry}\n")
-            except Exception as write_exc:
-                print(f"[ActionRouter] Error escribiendo en USER.md: {write_exc}")
-
-        # Notificar a Synapse
-        if self.synapse:
-            try:
-                self.synapse.emit("memory_updated", {"type": "user", "entry": entry})
-            except Exception:
-                pass
+        if await self.queue_hermes_tool_call(call_id, name, prompt):
+            return
 
         if session:
             try:
@@ -683,14 +664,14 @@ class ActionRouter:
                             id=call_id,
                             name=name,
                             response={
-                                "status": "guardado",
-                                "mensaje": f"Aprendido y recordado permanentemente: '{contenido}'. Confirma verbalmente al usuario con elegancia.",
+                                "status": "error",
+                                "mensaje": "No pude poner la memoria en cola para Hermes en este momento.",
                             },
                         )
                     ]
                 )
             except Exception as exc:
-                print(f"[ActionRouter] Error enviando respuesta de memoria: {exc}")
+                print(f"[ActionRouter] Error respondiendo fallo de memoria: {exc}")
 
     async def _handle_screen_capture(self, call_id: str, name: str, args: dict, session):
         """Captura la pantalla del usuario en Windows y genera análisis visual multimodal."""
@@ -989,6 +970,20 @@ class ActionRouter:
                             f"Tarea Hermes completada: {res_str}",
                             kind="hermes_task_completed",
                         )
+                else:
+                    reason = "resultado descartado antes de ser entregado"
+                    print(
+                        f"[ActionRouter] Entrega descartada: turn={turn.turn_id}, "
+                        f"state={turn.state.value}, reason={reason}"
+                    )
+                    self.synapse.change_state(TurnState.STALE, turn_id=turn.turn_id)
+                    if self.task_ledger:
+                        self.task_ledger.mark_stale(task_record, reason)
+                    if self.conversation_sessions:
+                        self.conversation_sessions.record_system(
+                            f"Resultado Hermes descartado: {reason}",
+                            kind="hermes_task_stale",
+                        )
 
             except Exception as exc:
                 print(f"[ActionRouter] Error inyectando resultado: {exc}")
@@ -1043,6 +1038,7 @@ class ActionRouter:
             source="hermes",
             turn_id=turn.turn_id,
             task_id=task_id,
+            requires_active_session=not bool(self.local_tts),
         )
         self.delivery_queue.enqueue(item)
         wake_request = None
@@ -1258,6 +1254,12 @@ class ActionRouter:
                 )
         return res
 
+    @staticmethod
+    def _is_duplicate_pending_request(user_response: str, pending_prompt: str) -> bool:
+        """Evita que una tool call repetida borre una confirmación de riesgo."""
+        original_request = ActionRouter._normalize_intent(pending_prompt)
+        return bool(original_request and user_response == original_request)
+
     async def submit_tool_call(
         self,
         tool_name: str,
@@ -1270,6 +1272,14 @@ class ActionRouter:
         Punto de entrada unificado para todas las tool calls.
         Clasifica, valida seguridad/capacidades y despacha la tarea.
         """
+        # El worker SLOW puede haber terminado de registrar MCP mientras JARVIS
+        # estaba ocioso. Actualizamos antes de decidir capacidades, sin competir
+        # por su canal IPC si ya hay trabajo activo.
+        if not self.has_active_work():
+            refresh_capabilities = getattr(self.brain, "refresh_capabilities", None)
+            if callable(refresh_capabilities):
+                refresh_capabilities()
+
         prompt = args.get("prompt", "")
         prompt_chars = len(prompt)
 
@@ -1279,11 +1289,10 @@ class ActionRouter:
             challenge = self._normalize_intent(self.pending_confirmation.challenge_phrase)
 
             orig_conf = self.pending_confirmation
-            self.pending_confirmation = None  # Consumir confirmación de inmediato
 
             # Afirmaciones comunes simples no son suficientes
             if user_response in ("si", "ok", "dale", "proceder", "adelante", "okey", "vale", "listo", "yes", "go"):
-                print(f"[LaneRouter] Afirmacion simple no es suficiente para confirmar call={orig_conf.call_id}")
+                print(f"[LaneRouter] Confirmacion pendiente conservada: afirmacion simple call={orig_conf.call_id}")
                 if session:
                     try:
                         await session.send_tool_response(
@@ -1291,8 +1300,26 @@ class ActionRouter:
                                 id=call_id,
                                 name=tool_name,
                                 response={
-                                    "status": "rechazada",
+                                    "status": "confirmacion_pendiente",
                                     "mensaje": f"Confirmación insuficiente. Para proceder con esta acción de alto riesgo, debes repetir exactamente la frase: '{orig_conf.challenge_phrase}'."
+                                },
+                            )]
+                        )
+                    except Exception:
+                        pass
+                return
+
+            if self._is_duplicate_pending_request(user_response, orig_conf.prompt):
+                print(f"[LaneRouter] Confirmacion pendiente conservada: tool call duplicada call={orig_conf.call_id}")
+                if session:
+                    try:
+                        await session.send_tool_response(
+                            function_responses=[types.FunctionResponse(
+                                id=call_id,
+                                name=tool_name,
+                                response={
+                                    "status": "confirmacion_pendiente",
+                                    "mensaje": f"Esa acción ya está pendiente de confirmación. Para proceder, repite exactamente: '{orig_conf.challenge_phrase}'."
                                 },
                             )]
                         )
@@ -1303,6 +1330,7 @@ class ActionRouter:
             if challenge in user_response:
                 # Confirmación exitosa! Procedemos a ejecutar la tarea original.
                 print(f"[LaneRouter] Confirmacion exitosa para call={orig_conf.call_id} challenge='{orig_conf.challenge_phrase}'")
+                self.pending_confirmation = None
 
                 # Enviar respuesta de confirmación procesada a la tool call actual
                 if session:
@@ -1332,6 +1360,7 @@ class ActionRouter:
                 return
             elif any(term in user_response for term in ("cancela", "cancelar", "no", "abortar")):
                 print(f"[LaneRouter] Confirmacion cancelada por el usuario para call={orig_conf.call_id}")
+                self.pending_confirmation = None
                 if session:
                     try:
                         await session.send_tool_response(
@@ -1349,6 +1378,7 @@ class ActionRouter:
                 return
             else:
                 print(f"[LaneRouter] Confirmacion incorrecta para call={orig_conf.call_id}. Recibido: '{prompt}'")
+                self.pending_confirmation = None
                 if session:
                     try:
                         await session.send_tool_response(
@@ -1392,6 +1422,13 @@ class ActionRouter:
             if missing_caps:
                 missing_str = "/".join(missing_caps)
                 print(f"[LaneRouter] reject call={call_id} lane={lane_str} reason=missing_capabilities_{missing_str}")
+                mcp_status = capability_registry.snapshot_payload().get("slow_mcp_status")
+                if "mcp" in missing_caps and mcp_status == "initializing":
+                    capability_message = "El servidor MCP todavía se está inicializando. Inténtalo de nuevo en unos segundos."
+                elif "mcp" in missing_caps and mcp_status == "failed":
+                    capability_message = "El servidor MCP configurado falló al iniciar. Revisa su estado en el panel de JARVIS."
+                else:
+                    capability_message = f"No tengo activo el acceso de {missing_str} para crear eso."
                 if session:
                     try:
                         await session.send_tool_response(
@@ -1400,7 +1437,7 @@ class ActionRouter:
                                 name=tool_name,
                                 response={
                                     "status": "error",
-                                    "mensaje": f"No tengo activo el acceso de {missing_str} para crear eso."
+                                    "mensaje": capability_message
                                 },
                             )]
                         )

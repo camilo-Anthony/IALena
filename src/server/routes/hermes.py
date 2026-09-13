@@ -1,13 +1,20 @@
-import subprocess
-from pathlib import Path
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 from src.server.kernel_bridge import (
     get_hermes_mcps,
     get_hermes_toolsets,
+    get_hermes_skills,
     get_tasks,
     dispatch_hermes_task,
     get_scheduler_and_sentinel_status,
+    get_hermes_memory,
+    get_hermes_cron_jobs,
+    create_hermes_cron_job,
+    set_hermes_cron_job_state,
+    update_hermes_cron_job,
+    delete_hermes_cron_job,
+    get_hermes_cron_outputs,
+    reload_hermes_slow_worker,
 )
 
 router = APIRouter(prefix="/hermes", tags=["Hermes"])
@@ -88,38 +95,56 @@ def read_toolsets():
 
 @router.get("/skills")
 def read_skills():
-    """Retorna la lista de skills instaladas en Hermes-Agent/skills."""
-    root_dir = Path(__file__).resolve().parents[3]
-    skills_dir = root_dir / "Hermes-Agent" / "skills"
-    if not skills_dir.exists():
-        return {"skills": []}
-    skills = []
-    for skill_path in sorted(skills_dir.iterdir()):
-        if skill_path.is_dir() and not skill_path.name.startswith((".", "_")):
-            readme_path = skill_path / "SKILL.md"
-            desc = ""
-            if readme_path.exists():
-                try:
-                    content = readme_path.read_text(encoding="utf-8")
-                    for line in content.splitlines():
-                        if line.startswith("description:"):
-                            desc = line.split("description:", 1)[1].strip().strip('"').strip("'")
-                            break
-                    if not desc:
-                        for line in content.splitlines():
-                            if line.startswith("# "):
-                                desc = line[2:].strip()
-                                break
-                except Exception:
-                    pass
-            skills.append({
-                "name": skill_path.name,
-                "description": desc or "Habilidad especializada de Hermes Agent",
-            })
-    return {"skills": skills}
+    return get_hermes_skills()
 
 
-@router.post("/launch")
-def launch_hermes():
-    return {"status": "ok", "message": "Hermes cockpit is integrated"}
+@router.get("/memory")
+def read_memory():
+    return get_hermes_memory()
 
+
+class CronJobCreateModel(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=12000)
+    schedule: str = Field(..., min_length=1, max_length=200)
+    name: str = Field(default="", max_length=160)
+
+
+class CronJobUpdateModel(BaseModel):
+    name: str | None = Field(default=None, max_length=160)
+    prompt: str | None = Field(default=None, min_length=1, max_length=12000)
+    schedule: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+@router.get("/cron")
+def read_cron_jobs():
+    return get_hermes_cron_jobs()
+
+
+@router.post("/cron")
+def create_cron_job(body: CronJobCreateModel):
+    return create_hermes_cron_job(body.prompt, body.schedule, body.name)
+
+
+@router.post("/cron/{job_id}/{action}")
+def update_cron_job(job_id: str, action: str):
+    return set_hermes_cron_job_state(job_id, action)
+
+
+@router.patch("/cron/{job_id}")
+def edit_cron_job(job_id: str, body: CronJobUpdateModel):
+    return update_hermes_cron_job(job_id, body.model_dump(exclude_none=True))
+
+
+@router.delete("/cron/{job_id}")
+def delete_cron_job(job_id: str):
+    return delete_hermes_cron_job(job_id)
+
+
+@router.get("/cron/{job_id}/outputs")
+def read_cron_outputs(job_id: str):
+    return get_hermes_cron_outputs(job_id)
+
+
+@router.post("/reload-slow")
+def reload_slow_worker():
+    return reload_hermes_slow_worker()

@@ -1,4 +1,4 @@
-import React, { useRef, useMemo } from "react";
+import React, { useRef, useMemo, useEffect } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { createGlowTexture } from "./OrbTextures";
@@ -72,6 +72,8 @@ export function OrbCore({ color, pulseIntensity }: OrbCoreProps) {
     () => createGlowTexture(512, "rgba(255,255,255,1.0)", "rgba(255,255,255,0.0)"),
     []
   );
+
+  useEffect(() => () => glowMap.dispose(), [glowMap]);
 
   const uniforms = useMemo(
     () => ({

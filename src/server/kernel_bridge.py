@@ -7,7 +7,9 @@ del kernel directamente — solo dicts serializables.
 """
 from __future__ import annotations
 import time
+import sys
 from collections import deque
+from pathlib import Path
 from threading import Lock
 from typing import Any, Optional, TYPE_CHECKING
 
@@ -161,8 +163,11 @@ def get_status() -> dict[str, Any]:
             "uptime_seconds": uptime,
             "kernel_ready": True,
             "live_connected": _get_live_connected(),
-            "hermes_slow_ready": _kernel.brain is not None and getattr(_kernel.brain, "hermes_agent", None) is not None,
-            "hermes_fast_ready": _kernel.brain_fast is not None and getattr(_kernel.brain_fast, "hermes_agent", None) is not None,
+            # SLOW runs in an isolated worker, so ``hermes_agent`` intentionally
+            # remains None in this process. The adapter's availability contract is
+            # the only truthful readiness signal for both execution lanes.
+            "hermes_slow_ready": _brain_is_available(getattr(_kernel, "brain", None)),
+            "hermes_fast_ready": _brain_is_available(getattr(_kernel, "brain_fast", None)),
             "activation_state": _kernel.activation_gate.state.value,
             "tasks": task_payload,
             "key_rotator": key_status,
@@ -186,6 +191,15 @@ def _get_live_connected() -> bool:
         if va is None:
             return False
         return getattr(va, "session", None) is not None
+    except Exception:
+        return False
+
+
+def _brain_is_available(brain: Any) -> bool:
+    if brain is None:
+        return False
+    try:
+        return bool(brain.is_available())
     except Exception:
         return False
 
@@ -316,8 +330,7 @@ def get_hermes_mcps() -> dict[str, Any]:
     """Lee MCP servers de ~/.hermes/config.yaml sin ejecutar nada."""
     try:
         import yaml
-        from pathlib import Path
-        config_path = Path.home() / ".hermes" / "config.yaml"
+        config_path = _get_hermes_home_path() / "config.yaml"
         if not config_path.exists():
             return _sanitize_json_obj({"mcps": [], "config_path": str(config_path), "found": False})
         with open(config_path, encoding="utf-8") as f:
@@ -346,8 +359,7 @@ def save_hermes_mcp(name: str, mcp_config: dict[str, Any]) -> dict[str, Any]:
     """Agrega o actualiza un servidor MCP en ~/.hermes/config.yaml."""
     try:
         import yaml
-        from pathlib import Path
-        config_dir = Path.home() / ".hermes"
+        config_dir = _get_hermes_home_path()
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "config.yaml"
         data = {}
@@ -380,8 +392,7 @@ def remove_hermes_mcp(name: str) -> dict[str, Any]:
     """Elimina un servidor MCP de ~/.hermes/config.yaml."""
     try:
         import yaml
-        from pathlib import Path
-        config_path = Path.home() / ".hermes" / "config.yaml"
+        config_path = _get_hermes_home_path() / "config.yaml"
         if not config_path.exists():
             return {"success": False, "error": "config.yaml not found"}
         with open(config_path, encoding="utf-8") as f:
@@ -401,8 +412,7 @@ def toggle_hermes_mcp(name: str) -> dict[str, Any]:
     """Alterna el estado enabled de un servidor MCP en ~/.hermes/config.yaml."""
     try:
         import yaml
-        from pathlib import Path
-        config_path = Path.home() / ".hermes" / "config.yaml"
+        config_path = _get_hermes_home_path() / "config.yaml"
         if not config_path.exists():
             return {"success": False, "error": "config.yaml not found"}
         with open(config_path, encoding="utf-8") as f:
@@ -431,3 +441,233 @@ def get_hermes_toolsets() -> dict[str, Any]:
         })
     except Exception as exc:
         return _sanitize_json_obj({"enabled": [], "disabled": [], "error": str(exc)})
+
+
+def get_hermes_skills() -> dict[str, Any]:
+    """Descubre las skills activas de Hermes desde todas sus raíces reales."""
+    _ensure_hermes_import_path()
+    project_root = Path(__file__).resolve().parents[2]
+    bundled_root = project_root / "Hermes-Agent" / "skills"
+    user_root = _get_hermes_home_path() / "skills"
+    try:
+        from agent.skill_utils import get_all_skills_dirs, is_excluded_skill_path, parse_frontmatter
+
+        roots = [bundled_root, *get_all_skills_dirs()]
+    except Exception:
+        roots = [bundled_root, user_root]
+
+        def is_excluded_skill_path(_: Path) -> bool:
+            return False
+
+        def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
+            return {}, content
+
+    records: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for root in roots:
+        root_path = Path(root)
+        if not root_path.exists():
+            continue
+        try:
+            skill_paths = root_path.rglob("SKILL.md")
+            for skill_path in skill_paths:
+                if is_excluded_skill_path(skill_path):
+                    continue
+                resolved = str(skill_path.parent.resolve())
+                if resolved in seen_paths:
+                    continue
+                seen_paths.add(resolved)
+                try:
+                    content = skill_path.read_text(encoding="utf-8")
+                    metadata, _ = parse_frontmatter(content)
+                    description = str(metadata.get("description") or "").strip()
+                    if not description:
+                        for line in content.splitlines():
+                            if line.startswith("# "):
+                                description = line[2:].strip()
+                                break
+                except Exception:
+                    description = ""
+
+                try:
+                    if skill_path.is_relative_to(user_root):
+                        source = "perfil"
+                        writable = True
+                    elif skill_path.is_relative_to(bundled_root):
+                        source = "integrada"
+                        writable = False
+                    else:
+                        source = "externa"
+                        writable = False
+                except ValueError:
+                    source = "externa"
+                    writable = False
+
+                records.append({
+                    "name": skill_path.parent.name,
+                    "description": description or "Skill de Hermes sin descripción declarada.",
+                    "source": source,
+                    "writable": writable,
+                    "path": str(skill_path.parent),
+                })
+        except OSError:
+            continue
+    return _sanitize_json_obj({"skills": sorted(records, key=lambda item: (item["name"].lower(), item["source"]))})
+
+
+def _ensure_hermes_import_path() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    hermes_dir = str(project_root / "Hermes-Agent")
+    if hermes_dir not in sys.path:
+        sys.path.insert(0, hermes_dir)
+
+
+def _get_hermes_home_path() -> Path:
+    _ensure_hermes_import_path()
+    try:
+        from hermes_constants import get_hermes_home
+        return Path(get_hermes_home())
+    except Exception:
+        return Path.home() / ".hermes"
+
+
+def _read_context_document(path: Path, max_chars: int = 12000) -> dict[str, Any]:
+    if not path.exists():
+        return {"exists": False, "content": "", "updated_at": None}
+    try:
+        content = path.read_text(encoding="utf-8")
+        if len(content) > max_chars:
+            content = content[-max_chars:]
+        return {
+            "exists": True,
+            "content": content,
+            "updated_at": path.stat().st_mtime,
+        }
+    except Exception as exc:
+        return {"exists": True, "content": "", "updated_at": None, "error": str(exc)}
+
+
+def get_hermes_memory() -> dict[str, Any]:
+    """Expone contexto persistente para revisión; la escritura sigue siendo autoridad de Hermes."""
+    home = _get_hermes_home_path()
+    return _sanitize_json_obj({
+        "home_ready": home.exists(),
+        "identity": _read_context_document(home / "SOUL.md"),
+        "user_memory": _read_context_document(home / "memories" / "USER.md"),
+        "agent_memory": _read_context_document(home / "memories" / "MEMORY.md"),
+    })
+
+
+def get_hermes_cron_jobs() -> dict[str, Any]:
+    """Lee los cron jobs nativos de Hermes sin usar la UI Electron."""
+    try:
+        _ensure_hermes_import_path()
+        from cron.jobs import list_jobs
+        return _sanitize_json_obj({"jobs": list_jobs(include_disabled=True)})
+    except Exception as exc:
+        return _sanitize_json_obj({"jobs": [], "error": str(exc)})
+
+
+def create_hermes_cron_job(prompt: str, schedule: str, name: str = "") -> dict[str, Any]:
+    try:
+        _ensure_hermes_import_path()
+        from cron.jobs import create_job
+        job = create_job(prompt=prompt, schedule=schedule, name=name or None, deliver="local")
+        return _sanitize_json_obj({"success": True, "job": job})
+    except Exception as exc:
+        return _sanitize_json_obj({"success": False, "error": str(exc)})
+
+
+def set_hermes_cron_job_state(job_id: str, action: str) -> dict[str, Any]:
+    try:
+        _ensure_hermes_import_path()
+        from cron.jobs import pause_job, resume_job, trigger_job
+        actions = {"pause": pause_job, "resume": resume_job, "trigger": trigger_job}
+        operation = actions.get(action)
+        if operation is None:
+            return {"success": False, "error": "Acción de cron no permitida."}
+        job = operation(job_id)
+        if job is None:
+            return {"success": False, "error": "Cron job no encontrado."}
+        return _sanitize_json_obj({"success": True, "job": job})
+    except Exception as exc:
+        return _sanitize_json_obj({"success": False, "error": str(exc)})
+
+
+def update_hermes_cron_job(job_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    """Actualiza sólo los campos de cron que son seguros de editar desde JARVIS."""
+    allowed_fields = {"name", "prompt", "schedule"}
+    safe_updates = {key: value for key, value in (updates or {}).items() if key in allowed_fields}
+    if not safe_updates:
+        return {"success": False, "error": "No se recibió ningún campo de cron editable."}
+    try:
+        _ensure_hermes_import_path()
+        from cron.jobs import update_job
+
+        job = update_job(job_id, safe_updates)
+        if job is None:
+            return {"success": False, "error": "Cron job no encontrado."}
+        return _sanitize_json_obj({"success": True, "job": job})
+    except Exception as exc:
+        return _sanitize_json_obj({"success": False, "error": str(exc)})
+
+
+def delete_hermes_cron_job(job_id: str) -> dict[str, Any]:
+    """Elimina un cron job concreto mediante la API validada de Hermes."""
+    try:
+        _ensure_hermes_import_path()
+        from cron.jobs import remove_job
+
+        if not remove_job(job_id):
+            return {"success": False, "error": "Cron job no encontrado."}
+        return {"success": True, "removed": job_id}
+    except Exception as exc:
+        return _sanitize_json_obj({"success": False, "error": str(exc)})
+
+
+def get_hermes_cron_outputs(job_id: str, limit: int = 10) -> dict[str, Any]:
+    """Retorna salida histórica acotada de un job validado por Hermes."""
+    try:
+        _ensure_hermes_import_path()
+        from cron.jobs import get_job
+
+        job = get_job(job_id)
+        if job is None:
+            return {"outputs": [], "error": "Cron job no encontrado."}
+        canonical_id = str(job["id"])
+        if not canonical_id or any(token in canonical_id for token in ("/", "\\", "..")):
+            return {"outputs": [], "error": "Identificador de cron inválido."}
+
+        output_root = (_get_hermes_home_path() / "cron" / "output").resolve()
+        output_dir = (output_root / canonical_id).resolve()
+        if output_dir.parent != output_root or not output_dir.exists():
+            return {"outputs": []}
+
+        records = []
+        for output_path in sorted(output_dir.glob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True)[:max(1, min(limit, 25))]:
+            try:
+                content = output_path.read_text(encoding="utf-8")
+                records.append({
+                    "name": output_path.name,
+                    "created_at": output_path.stat().st_mtime,
+                    "content": content[-16000:],
+                })
+            except OSError:
+                continue
+        return _sanitize_json_obj({"outputs": records})
+    except Exception as exc:
+        return _sanitize_json_obj({"outputs": [], "error": str(exc)})
+
+
+def reload_hermes_slow_worker() -> dict[str, Any]:
+    """Aplica configuración al worker SLOW sin reiniciar voz, FAST ni JARVIS."""
+    if _kernel is None:
+        return {"success": False, "error": "Kernel no registrado."}
+    brain = getattr(_kernel, "brain", None)
+    if brain is None or not hasattr(brain, "reload_slow_worker"):
+        return {"success": False, "error": "El worker Hermes SLOW no admite recarga en caliente."}
+    try:
+        success, message = brain.reload_slow_worker()
+        return {"success": bool(success), "message": str(message)}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}

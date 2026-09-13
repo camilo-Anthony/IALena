@@ -1,4 +1,4 @@
-import React, { useRef, useMemo } from "react";
+import React, { useRef, useMemo, useEffect } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 
@@ -48,6 +48,15 @@ export function OrbFilaments({
       };
     });
   }, [count, pointsPerFilament]);
+
+  useEffect(() => {
+    return () => {
+      filaments.forEach(({ geo, line }) => {
+        geo.dispose();
+        (line.material as THREE.Material).dispose();
+      });
+    };
+  }, [filaments]);
 
   useFrame((state) => {
     const time = state.clock.getElapsedTime();

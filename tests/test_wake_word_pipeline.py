@@ -145,6 +145,19 @@ class TestOpenWakeWordDetector(unittest.TestCase):
 
 
 class TestAudioPipeline(unittest.IsolatedAsyncioTestCase):
+    async def test_discard_pending_audio_clears_queue_and_preroll(self):
+        raw_capture = MockAudioCapture()
+        pipeline = AudioPipeline(raw_capture=raw_capture, wake_word_enabled=False)
+        pipeline.ring_buffer.write(b"\x01\x00" * 128)
+        pipeline._active_queue.put_nowait(b"old-audio")
+        pipeline._active_queue.put_nowait(b"older-audio")
+
+        discarded = pipeline.discard_pending_audio("test_reconnect")
+
+        self.assertEqual(discarded, 2)
+        self.assertEqual(pipeline._active_queue.qsize(), 0)
+        self.assertEqual(len(pipeline.ring_buffer), 0)
+
     async def test_audio_pipeline_dormant_to_active_with_preroll(self):
         raw_capture = MockAudioCapture()
         gate = ActivationGate(idle_sleep_seconds=10.0)

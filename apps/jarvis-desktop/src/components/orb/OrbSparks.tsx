@@ -1,4 +1,4 @@
-import React, { useRef, useMemo, useImperativeHandle, forwardRef } from "react";
+import React, { useRef, useMemo, useEffect, useImperativeHandle, forwardRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 
@@ -66,6 +66,8 @@ export const OrbSparks = forwardRef<OrbSparksRef, OrbSparksProps>(
         sparkAlphas: alphas,
       };
     }, []);
+
+    useEffect(() => () => geo.dispose(), [geo]);
 
     const spawnSpark = () => {
       for (let i = 0; i < SPARK_COUNT; i++) {

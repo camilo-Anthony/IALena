@@ -93,6 +93,8 @@ class TestHermesAdapterConfig(unittest.TestCase):
             "HERMES_SKIP_CONTEXT_FILES": "0",
             "HERMES_SKIP_MEMORY": "0",
             "HERMES_PASS_SESSION_ID": "1",
+            "HERMES_SKILL_NUDGE_INTERVAL": "0",
+            "HERMES_SLOW_ISOLATION": "0",
         }
 
         with (
@@ -305,6 +307,29 @@ class TestSynapseAndRouter(unittest.IsolatedAsyncioTestCase):
         )
 
         session_mock.send_client_content.assert_called_once()
+        self.assertEqual(self.action_router.synapse.last_turn.state, TurnState.COMPLETED)
+
+    async def test_discarded_result_delivery_closes_turn_as_stale(self):
+        self.brain.delay = 0.01
+        ledger = self.make_ledger()
+        self.action_router.task_ledger = ledger
+        self.action_router.delivery_queue.wait_for_slot = AsyncMock(return_value=False)
+
+        await self.action_router.run_hermes("1", "test", "Resultado descartado")
+
+        self.assertEqual(self.action_router.synapse.last_turn.state, TurnState.STALE)
+        self.assertEqual(ledger.recent_tasks(1)[0].status, TaskStatus.STALE)
+        self.assertFalse(self.action_router.has_active_work())
+
+    async def test_result_uses_local_tts_when_live_session_is_unavailable(self):
+        self.brain.delay = 0.01
+        local_tts = AsyncMock()
+        self.action_router.local_tts = local_tts
+        self.action_router.get_session = lambda: None
+
+        await self.action_router.run_hermes("1", "test", "Resultado sin sesión Live")
+
+        local_tts.speak.assert_awaited_once_with("Éxito")
         self.assertEqual(self.action_router.synapse.last_turn.state, TurnState.COMPLETED)
 
     async def test_busy_tool_call_is_acknowledged_without_second_brain_run(self):
@@ -1063,6 +1088,19 @@ class TestSynapseAndRouter(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "cancelacion_sin_intencion_explicita")
 
+    def test_cognitive_policy_requires_cancel_word_boundary(self):
+        policy = CognitivePolicy()
+        policy.record_user_utterance("prepara el resumen y no detengas nada")
+
+        decision = policy.evaluate_tool_call(
+            "cancelar_tarea_hermes",
+            {"motivo": ""},
+            has_recent_voice=True,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "cancelacion_sin_intencion_explicita")
+
     def test_reconnect_memory_is_silent_context_not_resume_instruction(self):
         context_manager = ContextManager("JARVIS", "Usuario", "Aoede")
         context_manager.add_memory("El usuario preguntó por una tarea pasada.")
@@ -1800,6 +1838,7 @@ class TestSynapseAndRouter(unittest.IsolatedAsyncioTestCase):
 
     async def test_mcp_capability_detects_mcp_tools(self):
         from src.kernel.capability_registry import capability_registry, TaskCapability
+        capability_registry.update_slow_mcp_status("unconfigured")
         # Test con toolset mcp
         capability_registry.update_capabilities(
             lane="slow",
@@ -1809,12 +1848,57 @@ class TestSynapseAndRouter(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(capability_registry.has_capability("slow", TaskCapability.MCP))
 
         # Test con tool mcp
+        capability_registry.update_slow_mcp_status("unconfigured")
         capability_registry.update_capabilities(
             lane="slow",
             toolsets=[],
             tools=["mcp_filesystem_read"]
         )
         self.assertTrue(capability_registry.has_capability("slow", TaskCapability.MCP))
+
+    async def test_mcp_capability_requires_worker_readiness_when_reported(self):
+        from src.kernel.capability_registry import capability_registry, TaskCapability
+
+        capability_registry.update_slow_mcp_status(
+            "initializing",
+            servers=["filesystem"],
+        )
+        self.assertFalse(capability_registry.has_capability("slow", TaskCapability.MCP))
+
+        capability_registry.update_slow_mcp_status(
+            "ready",
+            servers=["filesystem"],
+            tools=["mcp_filesystem_read"],
+        )
+        self.assertTrue(capability_registry.has_capability("slow", TaskCapability.MCP))
+
+        capability_registry.update_slow_mcp_status(
+            "failed",
+            servers=["filesystem"],
+            error="connection refused",
+        )
+        self.assertFalse(capability_registry.has_capability("slow", TaskCapability.MCP))
+        self.assertEqual(
+            capability_registry.snapshot_payload()["slow_mcp_status"],
+            "failed",
+        )
+        capability_registry.update_slow_mcp_status("unconfigured")
+
+    async def test_explicit_memory_is_delegated_to_hermes(self):
+        self.action_router.run_hermes = AsyncMock()
+
+        await self.action_router.save_user_memory_tool_call(
+            "memory-1",
+            "guardar_memoria_usuario",
+            {"contenido": "Prefiero respuestas breves", "tipo": "preferencia_personal"},
+            None,
+        )
+        await asyncio.sleep(0)
+
+        self.action_router.run_hermes.assert_awaited_once()
+        _, _, prompt = self.action_router.run_hermes.await_args.args
+        self.assertIn("MEMORIA EXPLICITA DEL USUARIO", prompt)
+        self.assertIn("Prefiero respuestas breves", prompt)
 
     async def test_channels_are_disabled_by_default(self):
         from src.adapters.brain.hermes_adapter import _read_runtime_config
@@ -1891,12 +1975,31 @@ class TestSynapseAndRouter(unittest.IsolatedAsyncioTestCase):
         await self.action_router.submit_tool_call(
             "ejecutar_hermes_core", {"prompt": "sí"}, session_mock_2, "call-yes"
         )
-        # La confirmación debe haberse cancelado/rechazado por seguridad
-        self.assertIsNone(self.action_router.pending_confirmation)
+        # Un "sí" no autoriza la acción, pero tampoco debe perder la confirmación pendiente.
+        self.assertIsNotNone(self.action_router.pending_confirmation)
         session_mock_2.send_tool_response.assert_called_once()
         resp = session_mock_2.send_tool_response.call_args.kwargs["function_responses"][0].response
-        self.assertEqual(resp["status"], "rechazada")
+        self.assertEqual(resp["status"], "confirmacion_pendiente")
         self.assertIn("Confirmación insuficiente", resp["mensaje"])
+        self.assertEqual(self.brain.run_count, 0)
+
+    async def test_duplicate_high_risk_request_keeps_pending_confirmation(self):
+        session_mock = AsyncMock()
+        prompt = "borra el archivo temporal"
+        await self.action_router.submit_tool_call(
+            "ejecutar_hermes_core", {"prompt": prompt}, session_mock, "call-high"
+        )
+
+        challenge = self.action_router.pending_confirmation.challenge_phrase
+        duplicate_session = AsyncMock()
+        await self.action_router.submit_tool_call(
+            "ejecutar_hermes_core", {"prompt": prompt}, duplicate_session, "call-duplicate"
+        )
+
+        self.assertIsNotNone(self.action_router.pending_confirmation)
+        self.assertEqual(self.action_router.pending_confirmation.challenge_phrase, challenge)
+        response = duplicate_session.send_tool_response.call_args.kwargs["function_responses"][0].response
+        self.assertEqual(response["status"], "confirmacion_pendiente")
         self.assertEqual(self.brain.run_count, 0)
 
     async def test_session_too_short_skips_consolidation(self):

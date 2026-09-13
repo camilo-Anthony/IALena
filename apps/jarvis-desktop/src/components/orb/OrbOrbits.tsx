@@ -1,4 +1,4 @@
-import React, { useRef, useMemo } from "react";
+import React, { useRef, useMemo, useEffect } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { createGlowTexture } from "./OrbTextures";
@@ -59,6 +59,14 @@ export function OrbOrbits({ color, orbitSpeedMult, extMotion }: OrbOrbitsProps) 
       const trailGeo = new THREE.BufferGeometry();
       trailGeo.setAttribute("position", new THREE.BufferAttribute(trailPositions, 3));
       trailGeo.setAttribute("aAlpha", new THREE.BufferAttribute(trailAlphas, 1));
+      const trailMaterial = new THREE.ShaderMaterial({
+        uniforms: { uColor: { value: color.clone() } },
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        vertexShader: TrailVertexShader,
+        fragmentShader: TrailFragmentShader,
+      });
 
       return {
         cfg,
@@ -66,6 +74,8 @@ export function OrbOrbits({ color, orbitSpeedMult, extMotion }: OrbOrbitsProps) 
         packetSpeed: 1.2 + Math.random() * 1.8,
         trailPositions,
         trailGeo,
+        trailMaterial,
+        trailLine: new THREE.Line(trailGeo, trailMaterial),
         ringGroupRef: React.createRef<THREE.Group>(),
         ringMeshRef: React.createRef<THREE.Mesh>(),
         ghostMeshRef: React.createRef<THREE.Mesh>(),
@@ -74,6 +84,16 @@ export function OrbOrbits({ color, orbitSpeedMult, extMotion }: OrbOrbitsProps) 
       };
     });
   }, []);
+
+  useEffect(() => {
+    return () => {
+      glowMap.dispose();
+      orbits.forEach(({ trailGeo, trailMaterial }) => {
+        trailGeo.dispose();
+        trailMaterial.dispose();
+      });
+    };
+  }, [glowMap, orbits]);
 
   useFrame((state, delta) => {
     orbits.forEach((orb) => {
@@ -166,22 +186,7 @@ export function OrbOrbits({ color, orbitSpeedMult, extMotion }: OrbOrbitsProps) 
           </sprite>
 
           {/* Estela del Paquete */}
-          <primitive
-            object={
-              new THREE.Line(
-                orb.trailGeo,
-                new THREE.ShaderMaterial({
-                  uniforms: { uColor: { value: color.clone() } },
-                  transparent: true,
-                  depthWrite: false,
-                  blending: THREE.AdditiveBlending,
-                  vertexShader: TrailVertexShader,
-                  fragmentShader: TrailFragmentShader,
-                })
-              )
-            }
-            ref={orb.trailLineRef}
-          />
+          <primitive object={orb.trailLine} ref={orb.trailLineRef} />
         </group>
       ))}
     </group>

@@ -403,15 +403,9 @@ class CognitivePolicy:
             return True
         if self._contains_term(normalized, CANCEL_TOOL_NEGATIVE_TERMS):
             return False
-        return (
-            self._contains_term(normalized, CANCEL_TOOL_INTENT_TERMS)
-            or "cancel" in normalized
-            or "para" in normalized
-            or "stop" in normalized
-            or "dejalo" in normalized
-            or "olvidalo" in normalized
-            or "ya no" in normalized
-        )
+        # Usar coincidencia por palabra/frase evita falsos positivos como
+        # "prepara el resumen" -> "para".
+        return self._contains_term(normalized, CANCEL_TOOL_INTENT_TERMS)
 
     def has_explicit_task_status_request(self) -> bool:
         normalized = self.normalize_for_intent(

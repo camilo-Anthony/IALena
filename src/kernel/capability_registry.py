@@ -28,6 +28,11 @@ class CapabilitySnapshot:
     slow_tools: List[str] = field(default_factory=list)
     fast_toolsets: List[str] = field(default_factory=list)
     fast_tools: List[str] = field(default_factory=list)
+    slow_mcp_status: str = "unconfigured"
+    slow_mcp_reported: bool = False
+    slow_mcp_servers: List[str] = field(default_factory=list)
+    slow_mcp_tools: List[str] = field(default_factory=list)
+    slow_mcp_error: str = ""
     timestamp: float = field(default_factory=time.time)
 
 class CapabilityRegistry:
@@ -43,9 +48,40 @@ class CapabilityRegistry:
         if lane == "slow":
             self._snapshot.slow_toolsets = list(toolsets)
             self._snapshot.slow_tools = list(tools)
+            # Compatibilidad con adaptadores no aislados y pruebas antiguas que
+            # exponen herramientas MCP directamente, sin handshake de worker.
+            if (
+                self._snapshot.slow_mcp_status == "unconfigured"
+                and (
+                    any(toolset.startswith("mcp-") for toolset in toolsets)
+                    or any(tool.startswith("mcp_") for tool in tools)
+                )
+            ):
+                self._snapshot.slow_mcp_status = "ready"
         else:
             self._snapshot.fast_toolsets = list(toolsets)
             self._snapshot.fast_tools = list(tools)
+        self._snapshot.timestamp = time.time()
+
+    def update_slow_mcp_status(
+        self,
+        status: str,
+        servers: List[str] | None = None,
+        tools: List[str] | None = None,
+        error: str = "",
+    ) -> None:
+        """Actualiza MCP desde el worker, sin asumir que esté listo por configuración."""
+        allowed = {"unconfigured", "initializing", "ready", "failed"}
+        self._snapshot.slow_mcp_status = status if status in allowed else "failed"
+        self._snapshot.slow_mcp_reported = bool(servers) or self._snapshot.slow_mcp_status in {
+            "initializing",
+            "failed",
+        }
+        if servers is not None:
+            self._snapshot.slow_mcp_servers = list(servers)
+        if tools is not None:
+            self._snapshot.slow_mcp_tools = list(tools)
+        self._snapshot.slow_mcp_error = error
         self._snapshot.timestamp = time.time()
 
     def has_capability(self, lane: str, capability: TaskCapability) -> bool:
@@ -54,6 +90,13 @@ class CapabilityRegistry:
 
         # Casos dinámicos especiales
         if capability == TaskCapability.MCP:
+            # Si el worker informó el estado, ese dato prevalece sobre el YAML.
+            # No se debe ofrecer un MCP que aún está conectando o que falló.
+            if self._snapshot.slow_mcp_reported:
+                if self._snapshot.slow_mcp_status in {"initializing", "failed", "unconfigured"}:
+                    return False
+                if self._snapshot.slow_mcp_status == "ready":
+                    return bool(self._snapshot.slow_mcp_servers or self._snapshot.slow_mcp_tools)
             return any(ts.startswith("mcp-") for ts in toolsets) or any(t.startswith("mcp_") for t in tools)
         if capability == TaskCapability.HOME_ASSISTANT:
             return any(ts == "home_assistant" for ts in toolsets) or any(t.startswith("home_assistant") for t in tools)
@@ -96,6 +139,11 @@ class CapabilityRegistry:
             "slow_tools": list(self._snapshot.slow_tools),
             "fast_toolsets": list(self._snapshot.fast_toolsets),
             "fast_tools": list(self._snapshot.fast_tools),
+            "slow_mcp_status": self._snapshot.slow_mcp_status,
+            "slow_mcp_reported": self._snapshot.slow_mcp_reported,
+            "slow_mcp_servers": list(self._snapshot.slow_mcp_servers),
+            "slow_mcp_tools": list(self._snapshot.slow_mcp_tools),
+            "slow_mcp_error": self._snapshot.slow_mcp_error,
             "timestamp": self._snapshot.timestamp,
         }
 

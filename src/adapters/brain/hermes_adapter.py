@@ -4,6 +4,7 @@ import asyncio
 import time
 import threading
 import traceback
+import multiprocessing as mp
 from typing import Callable, Optional, Dict, Any
 
 # Asegurar que Hermes-Agent está en el path
@@ -21,6 +22,7 @@ except ImportError:
     AIAgent = None
 
 from src.adapters.brain.key_rotator import start_proxy
+from src.adapters.brain.hermes_slow_worker import run_slow_worker
 from src.kernel.capability_registry import capability_registry
 
 
@@ -111,6 +113,30 @@ def _format_config_list(values: Optional[list[str]]) -> str:
     return ",".join(values)
 
 
+def _configured_mcp_server_names() -> list[str]:
+    """Lee MCP habilitados desde el perfil Hermes activo sin iniciarlos."""
+    try:
+        import yaml
+        from hermes_constants import get_hermes_home
+
+        cfg_path = os.fspath(get_hermes_home() / "config.yaml")
+        if not os.path.exists(cfg_path):
+            return []
+        with open(cfg_path, "r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+        servers = config.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            return []
+        return [
+            str(name)
+            for name, value in servers.items()
+            if not isinstance(value, dict) or value.get("enabled", True)
+        ]
+    except Exception as exc:
+        print(f"[HermesAdapter][SLOW] No se pudo leer configuración MCP: {exc}")
+        return []
+
+
 # Toolsets seguros para el carril FAST (sin efectos secundarios)
 _FAST_SAFE_TOOLSETS = ["web"]
 # Toolsets bloqueados en FAST aunque el env lo habilite
@@ -142,6 +168,14 @@ class HermesAdapter(IAgentBrain):
         # Lock async para serializar la ejecución de Hermes SLOW por event loop
         # El modo FAST NO usa este lock (permite paralelismo real)
         self._async_locks: Dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
+        self._slow_isolated = mode == "slow" and _read_bool_env("HERMES_SLOW_ISOLATION", True)
+        self._slow_process = None
+        self._slow_conn = None
+        self._slow_ready = False
+        self._slow_task_running = False
+        self._slow_io_lock = threading.Lock()
+        self._slow_restart_lock = threading.Lock()
+        self._proxy_base_url: Optional[str] = None
 
         if not AIAgent:
             print("[HermesAdapter] ERROR: No se encontró el módulo Hermes Agent en el path.")
@@ -151,6 +185,7 @@ class HermesAdapter(IAgentBrain):
             # Iniciamos el proxy de llaves local (el puerto es compartido entre slow y fast)
             proxy_port = start_proxy(api_keys)
             proxy_base_url = f"http://127.0.0.1:{proxy_port}/v1/"
+            self._proxy_base_url = proxy_base_url
 
             if mode == "fast":
                 self._init_fast_mode(proxy_base_url, model_brain)
@@ -175,6 +210,10 @@ class HermesAdapter(IAgentBrain):
             f"identity={'on' if runtime_config['load_soul_identity'] else 'off'}, "
             f"memory={'off' if runtime_config['skip_memory'] else 'on'}"
         )
+        if self._slow_isolated:
+            self._start_slow_worker(proxy_base_url, model_brain, runtime_config)
+            return
+
         agent_cls = AIAgent
         if agent_cls is None:
             raise RuntimeError("Hermes Core no está disponible (AIAgent es None).")
@@ -229,12 +268,145 @@ class HermesAdapter(IAgentBrain):
         print(f"\033[94m[HermesAdapter][SLOW]\033[0m SLOW detected_tools={tools_str}")
         print(f"\033[94m[HermesAdapter][SLOW]\033[0m SLOW capabilities={caps_str}")
 
+    def _start_slow_worker(self, proxy_base_url: str, model_brain: str, runtime_config: dict[str, Any]) -> None:
+        """Arranca el proceso SLOW y espera la confirmación de Hermes."""
+        configured_mcp_servers = _configured_mcp_server_names()
+        capability_registry.update_slow_mcp_status(
+            "initializing" if configured_mcp_servers else "unconfigured",
+            servers=configured_mcp_servers,
+        )
+        context = mp.get_context("spawn")
+        parent_conn, child_conn = context.Pipe(duplex=True)
+        process = context.Process(
+            target=run_slow_worker,
+            args=(child_conn, proxy_base_url, model_brain, runtime_config),
+            name="JARVIS-Hermes-SLOW",
+        )
+        # Hermes puede arrancar servidores MCP hijos; un Process daemon no puede
+        # crear descendientes en Python. El cierre explícito del Kernel supervisa
+        # este worker al apagar JARVIS.
+        process.daemon = False
+        process.start()
+        child_conn.close()
+        self._slow_process = process
+        self._slow_conn = parent_conn
+
+        deadline = time.monotonic() + float(os.getenv("HERMES_SLOW_START_TIMEOUT_SECONDS", "30"))
+        ready_message = None
+        while time.monotonic() < deadline:
+            if parent_conn.poll(0.1):
+                message = parent_conn.recv()
+                if message.get("type") == "ready":
+                    ready_message = message
+                    break
+                if message.get("type") == "init_error":
+                    self._terminate_slow_worker("init_error")
+                    raise RuntimeError(f"Hermes SLOW worker: {message.get('error')}")
+
+        if ready_message is None:
+            self._terminate_slow_worker("startup_timeout")
+            raise RuntimeError("Timeout iniciando Hermes SLOW worker")
+
+        self._slow_ready = True
+        tools_list = list(ready_message.get("tools") or [])
+        print(
+            f"\033[94m[HermesAdapter][SLOW]\033[0m Hermes worker listo "
+            f"(pid={process.pid}, checkpoints=on, skill_nudge={ready_message.get('skill_nudge', 0)})."
+        )
+        if tools_list:
+            print(f"\033[94m[HermesAdapter][SLOW]\033[0m Tools activos: {', '.join(tools_list)}")
+        else:
+            print("\033[94m[HermesAdapter][SLOW]\033[0m No se pudo inspeccionar tools activos; usando toolsets configurados.")
+        capability_registry.update_capabilities(
+            lane="slow",
+            toolsets=runtime_config["enabled_toolsets"] or [],
+            tools=tools_list,
+        )
+
+        from src.kernel.capability_registry import TaskCapability
+        caps = [cap.value for cap in TaskCapability if capability_registry.has_capability("slow", cap)]
+        print(f"\033[94m[HermesAdapter][SLOW]\033[0m SLOW capabilities={','.join(caps) or 'ninguna'}")
+
+    def _apply_worker_status(self, message: dict[str, Any], event_listener: Optional[Callable] = None) -> bool:
+        """Procesa mensajes auxiliares del worker sin confundirlos con resultados."""
+        message_type = message.get("type")
+        if message_type == "mcp_status":
+            status = str(message.get("status") or "failed")
+            servers = [str(server) for server in message.get("servers") or []]
+            tools = [str(tool) for tool in message.get("tools") or []]
+            error = str(message.get("error") or "")
+            capability_registry.update_slow_mcp_status(status, servers=servers, tools=tools, error=error)
+            detail = f"status={status}, servers={','.join(servers) or 'ninguno'}"
+            if error:
+                detail += f", error={error}"
+            print(f"[HermesAdapter][SLOW] MCP {detail}")
+            return True
+        if message_type == "event" and event_listener:
+            event_listener(message.get("event_type"), *(message.get("args") or []))
+            return True
+        if message_type == "worker_log":
+            print(f"[HermesWorker][SLOW] {message.get('message', '')}")
+            return True
+        return False
+
+    def refresh_capabilities(self) -> None:
+        """Drena actualizaciones de estado ocioso; no se ejecuta durante una tarea SLOW."""
+        if not self._slow_isolated or self.has_running_slow_task():
+            return
+        conn = self._slow_conn
+        if conn is None:
+            return
+        try:
+            with self._slow_io_lock:
+                while conn.poll():
+                    message = conn.recv()
+                    if not self._apply_worker_status(message):
+                        print(f"[HermesAdapter][SLOW] Mensaje diferido ignorado: {message.get('type', 'desconocido')}")
+        except (EOFError, BrokenPipeError, OSError) as exc:
+            capability_registry.update_slow_mcp_status("failed", error=f"worker_channel_closed: {exc}")
+
+    def has_running_slow_task(self) -> bool:
+        """El worker procesa una tarea por vez; se usa para no competir por el Pipe."""
+        return bool(getattr(self, "_slow_task_running", False))
+
+    def reload_slow_worker(self) -> tuple[bool, str]:
+        """Recrea el worker SLOW para aplicar configuración persistida.
+
+        Nunca recarga durante una tarea: terminar un proceso con una ejecución
+        activa puede dejar side effects externos inconclusos. FAST y la voz no
+        forman parte de esta operación.
+        """
+        if self.mode != "slow" or not self._slow_isolated:
+            return False, "La recarga en caliente requiere el worker SLOW aislado."
+        if self.has_running_slow_task():
+            return False, "Hay una tarea Hermes SLOW en curso; espera a que termine o cancélala."
+
+        with self._slow_restart_lock:
+            if self.has_running_slow_task():
+                return False, "Hay una tarea Hermes SLOW en curso; la recarga fue rechazada."
+            if not self._proxy_base_url:
+                return False, "El proxy de Hermes no está inicializado."
+
+            try:
+                self.close()
+                self._start_slow_worker(
+                    self._proxy_base_url,
+                    self.model_brain,
+                    _read_runtime_config(),
+                )
+                return True, "Hermes SLOW fue recargado con la configuración actual."
+            except Exception as exc:
+                self._slow_ready = False
+                return False, f"No se pudo recargar Hermes SLOW: {exc}"
+
     def _init_mcp_servers(self) -> None:
-        """Descubre e inicializa servidores MCP configurados en ~/.hermes/config.yaml."""
+        """Descubre e inicializa MCP desde el perfil Hermes activo."""
         try:
             from tools.mcp_tool import register_mcp_servers
             import yaml
-            cfg_path = os.path.expanduser("~/.hermes/config.yaml")
+            from hermes_constants import get_hermes_home
+
+            cfg_path = os.fspath(get_hermes_home() / "config.yaml")
             if os.path.exists(cfg_path):
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     cfg = yaml.safe_load(f) or {}
@@ -338,6 +510,92 @@ class HermesAdapter(IAgentBrain):
             self._async_locks[loop] = asyncio.Lock()
         return self._async_locks[loop]
 
+    def _send_slow_command(self, command: dict[str, Any]) -> bool:
+        conn = self._slow_conn
+        if conn is None or not self._slow_process or not self._slow_process.is_alive():
+            return False
+        try:
+            with self._slow_io_lock:
+                conn.send(command)
+            return True
+        except (BrokenPipeError, EOFError, OSError):
+            return False
+
+    def _terminate_slow_worker(self, reason: str) -> None:
+        process = self._slow_process
+        conn = self._slow_conn
+        self._slow_ready = False
+        self._slow_task_running = False
+        if process is not None and process.is_alive():
+            print(f"[HermesAdapter][SLOW] Terminando worker pid={process.pid}: {reason}")
+            process.terminate()
+            process.join(timeout=2.0)
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+        self._slow_process = None
+        self._slow_conn = None
+
+    @staticmethod
+    def _brain_result_from_message(message: dict[str, Any], started_at: float) -> BrainResult:
+        return BrainResult(
+            text=message.get("text", ""),
+            raw_text=message.get("raw_text", message.get("text", "")),
+            success=bool(message.get("success")),
+            error=message.get("error"),
+            interrupted=bool(message.get("interrupted")),
+            started_at=message.get("started_at", started_at),
+            finished_at=message.get("finished_at", time.time()),
+        )
+
+    async def _run_slow_isolated(self, task: str, event_listener: Optional[Callable], started_at: float) -> BrainResult:
+        timeout = float(os.getenv("HERMES_SLOW_TIMEOUT_SECONDS", "360.0"))
+        if not self._send_slow_command({"type": "run", "task": task}):
+            return BrainResult("", success=False, error="Hermes SLOW worker no disponible.", started_at=started_at, finished_at=time.time())
+
+        deadline = time.monotonic() + timeout
+        conn = self._slow_conn
+        try:
+            while True:
+                if conn is not None and conn.poll(0):
+                    message = conn.recv()
+                    if message.get("type") == "result":
+                        return self._brain_result_from_message(message, started_at)
+                    self._apply_worker_status(message, event_listener)
+                    continue
+
+                if not self._slow_process or not self._slow_process.is_alive():
+                    self._slow_ready = False
+                    return BrainResult("", success=False, error="Hermes SLOW worker terminó inesperadamente.", started_at=started_at, finished_at=time.time())
+                if time.monotonic() >= deadline:
+                    self._send_slow_command({"type": "cancel", "reason": "timeout SLOW"})
+                    cancel_deadline = time.monotonic() + float(os.getenv("HERMES_SLOW_CANCEL_GRACE_SECONDS", "2.0"))
+                    while time.monotonic() < cancel_deadline:
+                        if conn is not None and conn.poll(0):
+                            message = conn.recv()
+                            if message.get("type") == "result":
+                                result = self._brain_result_from_message(message, started_at)
+                                result.success = False
+                                result.interrupted = True
+                                result.error = result.error or "Cancelado tras timeout SLOW"
+                                return result
+                            self._apply_worker_status(message, event_listener)
+                        if not self._slow_process or not self._slow_process.is_alive():
+                            break
+                        await asyncio.sleep(0.05)
+                    self._terminate_slow_worker("timeout")
+                    return BrainResult("", success=False, error=f"Timeout SLOW tras {timeout}s", interrupted=True, started_at=started_at, finished_at=time.time())
+                await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            self._send_slow_command({"type": "cancel", "reason": "tarea asyncio cancelada"})
+            self._terminate_slow_worker("asyncio_cancelled")
+            raise
+        except (EOFError, BrokenPipeError, OSError) as exc:
+            self._terminate_slow_worker("pipe_error")
+            return BrainResult("", success=False, error=f"Canal Hermes SLOW cerrado: {exc}", started_at=started_at, finished_at=time.time())
+
     async def run_task(self, task: str, event_listener: Optional[Callable] = None) -> BrainResult:
         """Ejecuta una instrucción asincrónica en el agente Hermes subyacente.
 
@@ -348,6 +606,14 @@ class HermesAdapter(IAgentBrain):
             return BrainResult("", success=False, error="Hermes Core no está disponible.")
 
         started_at = time.time()
+
+        if self._slow_isolated:
+            async with self._get_lock():
+                self._slow_task_running = True
+                try:
+                    return await self._run_slow_isolated(task, event_listener, started_at)
+                finally:
+                    self._slow_task_running = False
 
         def _execute_sync() -> BrainResult:
             tid = threading.get_ident()
@@ -438,6 +704,8 @@ class HermesAdapter(IAgentBrain):
 
     def is_available(self) -> bool:
         """Retorna True si el agente se inicializó correctamente."""
+        if self._slow_isolated:
+            return bool(self._slow_ready and self._slow_process and self._slow_process.is_alive())
         return self.hermes_agent is not None
 
     async def review_session_memory(
@@ -446,6 +714,31 @@ class HermesAdapter(IAgentBrain):
         review_skills: bool = False,
     ) -> BrainResult:
         """Dispara la revision de memoria de Hermes para una sesion de voz cerrada."""
+        if self._slow_isolated:
+            started_at = time.time()
+            async with self._get_lock():
+                self._slow_task_running = True
+                if not self._send_slow_command({
+                    "type": "review_memory",
+                    "messages": list(messages or []),
+                    "review_skills": review_skills,
+                }):
+                    self._slow_task_running = False
+                    return BrainResult("", success=False, error="Hermes SLOW worker no disponible.", started_at=started_at, finished_at=time.time())
+                conn = self._slow_conn
+                try:
+                    while conn is not None:
+                        if conn.poll(0):
+                            message = conn.recv()
+                            if message.get("type") == "result":
+                                return self._brain_result_from_message(message, started_at)
+                            self._apply_worker_status(message)
+                        if not self._slow_process or not self._slow_process.is_alive():
+                            return BrainResult("", success=False, error="Hermes SLOW worker terminó inesperadamente.", started_at=started_at, finished_at=time.time())
+                        await asyncio.sleep(0.05)
+                finally:
+                    self._slow_task_running = False
+
         agent = self.hermes_agent
         if agent is None:
             return BrainResult("", success=False, error="Hermes Core no esta disponible.")
@@ -473,6 +766,10 @@ class HermesAdapter(IAgentBrain):
 
     def interrupt(self, reason: str = "Usuario interrumpió la tarea.") -> None:
         """Solicita cancelación cooperativa a Hermes."""
+        if self._slow_isolated:
+            if not self._send_slow_command({"type": "cancel", "reason": reason}):
+                print(f"[HermesAdapter][SLOW] No se pudo enviar cancelación: {reason}")
+            return
         agent = self.hermes_agent
         if agent is not None:
             # Inyectar el método si es que run_agent.py lo expone
@@ -480,3 +777,23 @@ class HermesAdapter(IAgentBrain):
                 agent.interrupt(reason)
             else:
                 print(f"[HermesAdapter] Advertencia: AIAgent no expone interrupt()")
+
+    def close(self) -> None:
+        """Cierra el worker SLOW y libera el canal IPC."""
+        if not self._slow_isolated:
+            return
+        if self._send_slow_command({"type": "shutdown"}):
+            process = self._slow_process
+            if process is not None:
+                process.join(timeout=2.0)
+        if self._slow_process is not None and self._slow_process.is_alive():
+            self._terminate_slow_worker("shutdown_timeout")
+        else:
+            self._slow_ready = False
+            if self._slow_conn is not None:
+                try:
+                    self._slow_conn.close()
+                except OSError:
+                    pass
+            self._slow_process = None
+            self._slow_conn = None

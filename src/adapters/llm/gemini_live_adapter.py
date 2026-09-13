@@ -398,6 +398,9 @@ class GeminiLiveAdapter(IVoiceAssistant):
                         reset_recent_voice = getattr(self.capture, "reset_recent_voice", None)
                         if callable(reset_recent_voice):
                             reset_recent_voice()
+                        discard_pending_audio = getattr(self.capture, "discard_pending_audio", None)
+                        if callable(discard_pending_audio):
+                            discard_pending_audio("live_session_connected")
                         self._session_started_at = time.monotonic()
                         
                         # Restablecer backoffs tras una conexión exitosa

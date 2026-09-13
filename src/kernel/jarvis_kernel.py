@@ -20,7 +20,6 @@ from src.kernel.cognitive_policy import CognitivePolicy
 from src.kernel.conversation_session import ConversationSessionManager, SessionMemoryConsolidator
 from src.kernel.synapse import Synapse
 from src.kernel.task_ledger import TaskLedger
-from src.kernel.memory_consolidator import MemoryConsolidator
 from src.kernel.hermes_scheduler_runner import HermesSchedulerRunner
 from src.kernel.system_sentinel import SystemSentinel
 
@@ -101,11 +100,6 @@ class JarvisKernel:
             brain_fast=self.brain_fast,
         )
 
-        self.memory_consolidator = MemoryConsolidator(
-            synapse=self.synapse,
-            get_hermes_home_fn=self.context_manager.get_hermes_home,
-        )
-
         self.hermes_scheduler = HermesSchedulerRunner(
             synapse=self.synapse,
             activation_gate=self.activation_gate,
@@ -137,9 +131,6 @@ class JarvisKernel:
             # Asociar el loop actual a Synapse para callbacks asíncronos seguros
             loop = asyncio.get_running_loop()
             self.synapse.attach_loop(loop)
-
-            # Iniciar motor de auto-aprendizaje pasivo
-            self.memory_consolidator.start(loop)
 
             # Iniciar scheduler nativo de Hermes
             self.hermes_scheduler.start(loop)
@@ -179,7 +170,9 @@ class JarvisKernel:
             self.system_sentinel.stop()
         if hasattr(self, "hermes_scheduler") and self.hermes_scheduler:
             self.hermes_scheduler.stop()
-        if self.memory_consolidator:
-            self.memory_consolidator.stop()
         if self.voice_assistant:
             self.voice_assistant.stop()
+        for brain in (self.brain, self.brain_fast):
+            close = getattr(brain, "close", None)
+            if callable(close):
+                close()

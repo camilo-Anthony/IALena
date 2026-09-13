@@ -62,7 +62,7 @@ export function useWindowEvasion(enabled = true) {
           console.error("[WindowEvasion] Error en get_cursor_position:", e);
         }
 
-        // ── LOOP DE FÍSICA (setInterval a 60fps) ──
+        // El movimiento de una ventana nativa no necesita competir con el render a 60 Hz.
         intervalRef.current = setInterval(async () => {
           if (!active || !posRef.current) return;
 
@@ -132,7 +132,7 @@ export function useWindowEvasion(enabled = true) {
           } catch {
             // Ignorar errores de frame individual
           }
-        }, 16); // ~60fps
+        }, 33); // ~30fps
 
         console.log("[WindowEvasion] Loop de física iniciado.");
 

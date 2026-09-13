@@ -74,6 +74,36 @@ const STATE_CONFIGS: Record<string, StateVisualConfig> = {
     vibration: 1.2,
     extMotion: 1.2,
   },
+  confirmando: {
+    name: "CONFIRMANDO",
+    color: new THREE.Color(ORB_COLORS.confirmando),
+    scaleMult: 0.98,
+    rotSpeed: 0.018,
+    synapseDensity: 0.35,
+    orbitSpeedMult: 0.9,
+    vibration: 0.18,
+    extMotion: 0.45,
+  },
+  reconectando: {
+    name: "RECONECTANDO",
+    color: new THREE.Color(ORB_COLORS.reconectando),
+    scaleMult: 0.96,
+    rotSpeed: 0.035,
+    synapseDensity: 0.45,
+    orbitSpeedMult: 1.15,
+    vibration: 0.5,
+    extMotion: 0.55,
+  },
+  error: {
+    name: "ERROR",
+    color: new THREE.Color(ORB_COLORS.error),
+    scaleMult: 0.92,
+    rotSpeed: 0.012,
+    synapseDensity: 0.1,
+    orbitSpeedMult: 0.45,
+    vibration: 0.12,
+    extMotion: 0.2,
+  },
 };
 
 const mapOrbStateToProfile = getOrbStateProfile;
@@ -154,7 +184,9 @@ function OrbContent({ state }: OrbContentProps) {
             } catch {
               // Fallback silencioso
             }
-            if (active) setTimeout(poll, 16);
+            // Una consulta nativa por frame compite con el audio y el render.
+            // 30 Hz mantiene la interacción fluida sin saturar el puente Tauri.
+            if (active) setTimeout(poll, 33);
           };
           poll();
         })
@@ -374,7 +406,8 @@ export function OrbScene({ state }: OrbSceneProps) {
   return (
     <Canvas
       camera={{ position: [0, 0, 7.2], fov: 40 }}
-      gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
+      dpr={[1, 1.5]}
+      gl={{ antialias: true, alpha: true }}
       style={{
         position: "fixed",
         inset: 0,

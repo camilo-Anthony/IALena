@@ -110,6 +110,8 @@ export function OrbParticleCloud({
     return { geometry: geo, positions: pos };
   }, [particleCount]);
 
+  React.useEffect(() => () => geometry.dispose(), [geometry]);
+
   React.useEffect(() => {
     if (onPositionsReady && positions) {
       onPositionsReady(positions);

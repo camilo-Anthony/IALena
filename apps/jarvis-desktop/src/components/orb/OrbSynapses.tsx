@@ -130,6 +130,13 @@ export function OrbSynapses({
       };
     }, [count, cloudPositions]);
 
+  useEffect(() => {
+    return () => {
+      lineGeo.dispose();
+      pulseGeo.dispose();
+    };
+  }, [lineGeo, pulseGeo]);
+
   const lineUniforms = useMemo(
     () => ({
       uColor: { value: color.clone() },

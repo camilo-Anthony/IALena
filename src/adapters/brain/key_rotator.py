@@ -23,7 +23,7 @@ Arquitectura:
 import itertools
 import json
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import request as urllib_request
 from urllib.error import HTTPError
 
@@ -231,7 +231,7 @@ def start_proxy(keys: list[str], port: int = PROXY_PORT) -> int:
 
     for attempt in range(max_attempts):
         try:
-            server = HTTPServer(("127.0.0.1", current_port), _RotatingProxy)
+            server = ThreadingHTTPServer(("127.0.0.1", current_port), _RotatingProxy)
             break
         except OSError as e:
             print(f"\033[33m[KeyRotator]\033[0m Puerto {current_port} ocupado. Probando el siguiente...")

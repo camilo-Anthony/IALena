@@ -4,6 +4,9 @@ import type {
   TasksPayload,
   HermesMCP,
   HermesToolsets,
+  HermesMemoryPayload,
+  HermesCronJob,
+  HermesCronOutput,
   LogEntry,
 } from "../types";
 
@@ -81,7 +84,7 @@ export const jarvisAPI = {
       method: "POST",
     }),
 
-  // Hermes Info & Launch
+  // Hermes Control Plane
   getHermesMCPs: () =>
     request<{ mcps: HermesMCP[]; config_path: string; found: boolean }>("/hermes/mcps"),
   saveHermesMCP: (server: {
@@ -107,7 +110,37 @@ export const jarvisAPI = {
   getHermesToolsets: () =>
     request<HermesToolsets>("/hermes/toolsets"),
   getHermesSkills: () =>
-    request<{ skills: Array<{ name: string; description: string }> }>("/hermes/skills"),
+    request<{ skills: Array<{ name: string; description: string; source: string; writable: boolean; path: string }> }>("/hermes/skills"),
+  getHermesMemory: () => request<HermesMemoryPayload>("/hermes/memory"),
+  getHermesCronJobs: () => request<{ jobs: HermesCronJob[]; error?: string }>("/hermes/cron"),
+  createHermesCronJob: (prompt: string, schedule: string, name: string) =>
+    request<{ success: boolean; job?: HermesCronJob; error?: string }>("/hermes/cron", {
+      method: "POST",
+      body: JSON.stringify({ prompt, schedule, name }),
+    }),
+  updateHermesCronJob: (jobId: string, action: "pause" | "resume" | "trigger") =>
+    request<{ success: boolean; job?: HermesCronJob; error?: string }>(
+      `/hermes/cron/${encodeURIComponent(jobId)}/${action}`,
+      { method: "POST" },
+    ),
+  editHermesCronJob: (jobId: string, updates: { name?: string; prompt?: string; schedule?: string }) =>
+    request<{ success: boolean; job?: HermesCronJob; error?: string }>(
+      `/hermes/cron/${encodeURIComponent(jobId)}`,
+      { method: "PATCH", body: JSON.stringify(updates) },
+    ),
+  deleteHermesCronJob: (jobId: string) =>
+    request<{ success: boolean; removed?: string; error?: string }>(
+      `/hermes/cron/${encodeURIComponent(jobId)}`,
+      { method: "DELETE" },
+    ),
+  getHermesCronOutputs: (jobId: string) =>
+    request<{ outputs: HermesCronOutput[]; error?: string }>(
+      `/hermes/cron/${encodeURIComponent(jobId)}/outputs`,
+    ),
+  reloadHermesSlow: () =>
+    request<{ success: boolean; message?: string; error?: string }>("/hermes/reload-slow", {
+      method: "POST",
+    }),
   // Hermes Cockpit & Autonomy
   getHermesTasks: () => request<TasksPayload>("/hermes/tasks"),
   dispatchHermesTask: (prompt: string, lane: "slow" | "fast" = "slow") =>
@@ -117,8 +150,4 @@ export const jarvisAPI = {
     }),
   getAutonomyStatus: () =>
     request<{ scheduler: any; sentinel: any }>("/hermes/status"),
-  launchHermes: () =>
-    request<{ status: string; message: string }>("/hermes/launch", {
-      method: "POST",
-    }),
 };

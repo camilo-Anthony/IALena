@@ -63,7 +63,9 @@ export type PanelTab =
   | "hermes_chat"
   | "hermes_tasks"
   | "hermes_skills"
+  | "hermes_memory"
   | "hermes_mcps"
+  | "hermes_cron"
   | "hermes_autonomy"
   | "hermes_settings"
   // Fallbacks
@@ -83,8 +85,8 @@ const SIDEBAR_GROUPS: SidebarGroup[] = [
     category: "MONITOR & DIAGNÓSTICO",
     items: [
       { key: "dashboard", label: "Dashboard General" },
-      { key: "logs", label: "Terminal Logs" },
-      { key: "acciones", label: "Quick Actions" },
+      { key: "logs", label: "Logs del Sistema" },
+      { key: "acciones", label: "Acciones Rápidas" },
     ],
   },
   {
@@ -100,9 +102,11 @@ const SIDEBAR_GROUPS: SidebarGroup[] = [
     category: "AGENTE HERMES CORE",
     items: [
       { key: "hermes_chat", label: "Consola & Chat" },
-      { key: "hermes_tasks", label: "Task Ledger" },
+      { key: "hermes_tasks", label: "Registro de Tareas" },
       { key: "hermes_skills", label: "Skills Nativas (12+)" },
+      { key: "hermes_memory", label: "Memoria & Identidad" },
       { key: "hermes_mcps", label: "Toolsets & Servidores MCP" },
+      { key: "hermes_cron", label: "Automatizaciones Cron" },
       { key: "hermes_autonomy", label: "Autonomía & Sentinel" },
       { key: "hermes_settings", label: "Directivas Operativas" },
     ],
@@ -463,6 +467,8 @@ export function PanelView() {
   const [isModelLiveOpen, setIsModelLiveOpen] = useState<boolean>(false);
   const [isModelBrainOpen, setIsModelBrainOpen] = useState<boolean>(false);
   const [isModelFastOpen, setIsModelFastOpen] = useState<boolean>(false);
+  const [quickActionStatus, setQuickActionStatus] = useState<string | null>(null);
+  const [quickActionPending, setQuickActionPending] = useState<string | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   // Sync config
@@ -504,6 +510,20 @@ export function PanelView() {
   };
 
   const [isSaving, setIsSaving] = useState<boolean>(false);
+
+  const runQuickAction = async (name: string, action: () => Promise<unknown>) => {
+    setQuickActionPending(name);
+    setQuickActionStatus(null);
+    try {
+      await action();
+      setQuickActionStatus(`${name}: completado`);
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setQuickActionStatus(`${name}: ${detail || "falló la operación"}`);
+    } finally {
+      setQuickActionPending(null);
+    }
+  };
 
   const handleDirectSave = async () => {
     setIsSaving(true);
@@ -568,7 +588,7 @@ export function PanelView() {
           <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399]" />
           <div>
             <div className="text-xs font-mono font-bold tracking-[2px] text-[#faf9f6] uppercase">JARVIS WORKBENCH</div>
-            <div className="text-[10px] font-mono text-[#868584] mt-1">Local Autonomous Core</div>
+            <div className="text-[10px] font-mono text-[#868584] mt-1">Centro de Control Autónomo</div>
           </div>
         </div>
 
@@ -623,14 +643,15 @@ export function PanelView() {
         </nav>
 
         {/* Bottom Nav / Return */}
-        <div className="pt-5 mt-2 border-t border-white/[0.06]">
+        <div className="pt-5 mt-2 border-t border-white/[0.06] space-y-2">
           <button
             onClick={() => setActiveView("orb")}
             className="w-full flex items-center justify-center gap-2.5 px-4 py-2.5 text-[13px] font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#1c1c1f] hover:bg-[#252528] border border-white/[0.06] rounded-xl transition cursor-pointer"
           >
             <span>←</span>
-            <span>Return to Orb</span>
+            <span>Volver al Orbe</span>
           </button>
+          <div className="text-center text-[9px] font-mono text-[#454545] mt-1">JARVIS v2.0 · localhost:8000</div>
         </div>
       </aside>
 
@@ -640,103 +661,172 @@ export function PanelView() {
 
           {/* ════════ DASHBOARD ════════ */}
           {activeTab === "dashboard" && (
-            <div className="space-y-4">
-              {/* Telemetry Grid */}
+            <div className="space-y-5">
+
+              {/* Header de salud del sistema */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <h1 className="text-base font-bold text-[#faf9f6] tracking-tight">Panel de Control</h1>
+                  <p className="text-[11px] text-[#868584] mt-0.5">Telemetría en tiempo real del núcleo JARVIS</p>
+                </div>
+                <button
+                  onClick={async () => {
+                    try { const s = await jarvisAPI.getStatus(); useJarvisStore.getState().setStatus(s); } catch {}
+                  }}
+                  className="flex items-center gap-2 px-3 py-1.5 text-[11px] font-mono text-[#868584] hover:text-[#afaeac] bg-[#1c1c1f] hover:bg-[#222226] border border-white/[0.06] rounded-lg transition cursor-pointer"
+                >
+                  <span>↻</span>
+                  <span>Actualizar</span>
+                </button>
+              </div>
+
+              {/* Telemetry Grid — 4 indicadores principales */}
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 <WarpCard>
-                  <WarpSectionLabel>Core Kernel</WarpSectionLabel>
+                  <WarpSectionLabel>Núcleo Principal</WarpSectionLabel>
                   <div className="flex items-center gap-2 mt-0.5">
                     <WarpStatusDot active={!!status?.kernel_ready} color="#22c55e" />
-                    <span className="text-sm font-semibold text-[#faf9f6]">{status?.kernel_ready ? "Operational" : "Offline"}</span>
+                    <span className="text-sm font-semibold text-[#faf9f6]">{status?.kernel_ready ? "Operativo" : "Desconectado"}</span>
                   </div>
-                  <div className="text-[11px] font-mono tabular-nums text-[#868584] mt-1.5">Uptime: {uptimeStr}</div>
+                  <div className="text-[11px] font-mono tabular-nums text-[#868584] mt-1.5">Activo: {uptimeStr}</div>
                 </WarpCard>
 
                 <WarpCard>
-                  <WarpSectionLabel>Live Voice</WarpSectionLabel>
+                  <WarpSectionLabel>Voz en Vivo</WarpSectionLabel>
                   <div className="flex items-center gap-2 mt-0.5">
                     <WarpStatusDot active={!!status?.live_connected} color="#38bdf8" />
-                    <span className="text-sm font-semibold text-[#faf9f6]">{status?.live_connected ? "Connected" : "Offline"}</span>
+                    <span className="text-sm font-semibold text-[#faf9f6]">{status?.live_connected ? "Conectado" : "Desconectado"}</span>
                   </div>
                   <div className="text-[11px] font-mono text-[#868584] mt-1.5">Gemini Live Link</div>
                 </WarpCard>
 
                 <WarpCard>
-                  <WarpSectionLabel>Hermes Slow</WarpSectionLabel>
+                  <WarpSectionLabel>Hermes Lento</WarpSectionLabel>
                   <div className="flex items-center gap-2 mt-0.5">
                     <WarpStatusDot active={!!status?.hermes_slow_ready} color="#f59e0b" />
-                    <span className="text-sm font-semibold text-[#faf9f6]">{status?.hermes_slow_ready ? "Active" : "Unavailable"}</span>
+                    <span className="text-sm font-semibold text-[#faf9f6]">{status?.hermes_slow_ready ? "Activo" : "No disponible"}</span>
                   </div>
-                  <div className="text-[11px] font-mono text-[#868584] mt-1.5">Autonomous Depth</div>
+                  <div className="text-[11px] font-mono text-[#868584] mt-1.5">Razonamiento Profundo</div>
                 </WarpCard>
 
                 <WarpCard>
-                  <WarpSectionLabel>Hermes Fast</WarpSectionLabel>
+                  <WarpSectionLabel>Hermes Rápido</WarpSectionLabel>
                   <div className="flex items-center gap-2 mt-0.5">
                     <WarpStatusDot active={!!status?.hermes_fast_ready} color="#a855f7" />
-                    <span className="text-sm font-semibold text-[#faf9f6]">{status?.hermes_fast_ready ? "Active" : "Unavailable"}</span>
+                    <span className="text-sm font-semibold text-[#faf9f6]">{status?.hermes_fast_ready ? "Activo" : "No disponible"}</span>
                   </div>
-                  <div className="text-[11px] font-mono text-[#868584] mt-1.5">Fast Brain Lane</div>
+                  <div className="text-[11px] font-mono text-[#868584] mt-1.5">Carril Paralelo Rápido</div>
                 </WarpCard>
               </div>
 
-              {/* Detail Panels */}
+              {/* Panel de detalles: Key Rotator + Wake Word */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
                 <WarpCard>
-                  <WarpSectionLabel>Key Rotator System</WarpSectionLabel>
+                  <WarpSectionLabel>Sistema de Rotación de Claves</WarpSectionLabel>
                   {status?.key_rotator ? (
                     <>
-                      <WarpStatRow label="Active Key Pool" value={`${status.key_rotator.pool_size} keys`} />
-                      <WarpStatRow label="Total Invocations" value={status.key_rotator.call_count} />
-                      <WarpStatRow label="Current Active Key" value={status.key_rotator.active_key_masked} color="#38bdf8" />
+                      <WarpStatRow label="Pool de Claves Activo" value={`${status.key_rotator.pool_size} claves`} />
+                      <WarpStatRow label="Invocaciones Totales" value={status.key_rotator.call_count} />
+                      <WarpStatRow label="Clave Activa Actual" value={status.key_rotator.active_key_masked} color="#38bdf8" />
                     </>
                   ) : (
-                    <div className="text-xs text-[#868584] italic">Rotator not loaded</div>
+                    <div className="text-xs text-[#868584] italic">Rotador no cargado</div>
                   )}
                 </WarpCard>
 
                 <WarpCard>
-                  <WarpSectionLabel>Wake Word & Gate</WarpSectionLabel>
+                  <WarpSectionLabel>Wake Word & Puerta de Activación</WarpSectionLabel>
                   <WarpStatRow
-                    label="Wake State"
+                    label="Estado Wake"
                     value={
                       <span className="flex items-center gap-2">
                         <WarpStatusDot active={status?.wake_word?.wake_word_enabled !== false} color="#22c55e" />
-                        <span>{status?.wake_word?.wake_word_enabled !== false ? "Armed" : "Disarmed"}</span>
+                        <span>{status?.wake_word?.wake_word_enabled !== false ? "Armado" : "Desarmado"}</span>
                       </span>
                     }
                   />
-                  <WarpStatRow label="Activation Gate" value={status?.activation_state || "—"} />
-                  <WarpStatRow label="Orb Stage Profile" value={status?.orb_state || "—"} color="#faf9f6" />
+                  <WarpStatRow label="Puerta de Activación" value={status?.activation_state || "—"} />
+                  <WarpStatRow label="Perfil del Orbe" value={status?.orb_state || "—"} color="#faf9f6" />
                 </WarpCard>
               </div>
 
-              {/* Diagnostic Test Bar */}
+              {/* Acciones rápidas directas desde dashboard */}
               <WarpCard>
-                <WarpSectionLabel>Diagnostics & Pipeline Validation</WarpSectionLabel>
+                <WarpSectionLabel>Acciones Rápidas del Sistema</WarpSectionLabel>
                 <div className="flex flex-wrap gap-2.5 items-center">
                   <button
-                    onClick={() => runTest("live", jarvisAPI.testLive)}
-                    className="px-3.5 py-1.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
+                    onClick={() => runQuickAction("Micrófono", () => jarvisAPI.toggleMute())}
+                    disabled={quickActionPending !== null}
+                    className="px-3.5 py-1.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer disabled:opacity-50"
                   >
-                    Test Live Session
+                    {quickActionPending === "Micrófono" ? "Procesando..." : "⏺ Micrófono"}
                   </button>
                   <button
-                    onClick={() => runTest("slow", jarvisAPI.testHermesSlow)}
-                    className="px-3.5 py-1.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
+                    onClick={() => runQuickAction("Sesión Live", () => jarvisAPI.restartVoice())}
+                    disabled={quickActionPending !== null}
+                    className="px-3.5 py-1.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer disabled:opacity-50"
                   >
-                    Test Hermes Slow
+                    {quickActionPending === "Sesión Live" ? "Procesando..." : "↺ Reiniciar Voz"}
                   </button>
                   <button
-                    onClick={() => runTest("fast", jarvisAPI.testHermesFast)}
+                    onClick={() => runQuickAction("Activación del núcleo", () => jarvisAPI.wake())}
+                    disabled={quickActionPending !== null}
+                    className="px-3.5 py-1.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer disabled:opacity-50"
+                  >
+                    {quickActionPending === "Activación del núcleo" ? "Procesando..." : "▶ Despertar"}
+                  </button>
+                  <button
+                    onClick={() => runQuickAction("Reposo del núcleo", () => jarvisAPI.sleep())}
+                    disabled={quickActionPending !== null}
+                    className="px-3.5 py-1.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer disabled:opacity-50"
+                  >
+                    {quickActionPending === "Reposo del núcleo" ? "Procesando..." : "⏸ Reposo"}
+                  </button>
+                  <button
+                    onClick={() => runQuickAction("Interrupción de tarea", () => jarvisAPI.cancelTask())}
+                    disabled={quickActionPending !== null}
+                    className="px-3.5 py-1.5 text-xs font-medium text-amber-300/80 hover:text-amber-200 bg-amber-950/20 hover:bg-amber-900/30 border border-amber-500/20 rounded-full transition cursor-pointer disabled:opacity-50"
+                  >
+                    {quickActionPending === "Interrupción de tarea" ? "Procesando..." : "⏹ Interrumpir Tarea"}
+                  </button>
+                  {quickActionStatus && (
+                    <span className={`text-xs font-mono px-3 py-1 rounded-full border ${
+                      quickActionStatus.includes(": completado")
+                        ? "bg-emerald-950/40 border-emerald-500/30 text-emerald-300"
+                        : "bg-red-950/40 border-red-500/30 text-red-300"
+                    }`}>
+                      {quickActionStatus}
+                    </span>
+                  )}
+                </div>
+              </WarpCard>
+
+              {/* Barra de diagnósticos */}
+              <WarpCard>
+                <WarpSectionLabel>Diagnósticos & Validación del Pipeline</WarpSectionLabel>
+                <div className="flex flex-wrap gap-2.5 items-center">
+                  <button
+                    onClick={() => runTest("voz-en-vivo", jarvisAPI.testLive)}
                     className="px-3.5 py-1.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
                   >
-                    Test Hermes Fast
+                    Probar Sesión en Vivo
+                  </button>
+                  <button
+                    onClick={() => runTest("hermes-lento", jarvisAPI.testHermesSlow)}
+                    className="px-3.5 py-1.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
+                  >
+                    Probar Hermes Lento
+                  </button>
+                  <button
+                    onClick={() => runTest("hermes-rapido", jarvisAPI.testHermesFast)}
+                    className="px-3.5 py-1.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
+                  >
+                    Probar Hermes Rápido
                   </button>
 
                   {Object.entries(testResults).map(([k, v]) => (
                     <span key={k} className={`text-xs font-mono px-3 py-1 rounded-full border ${v === "Passed" ? "bg-emerald-950/40 border-emerald-500/30 text-emerald-300" : v.startsWith("Failed") ? "bg-red-950/40 border-red-500/30 text-red-300" : "bg-[#222224] border-white/[0.08] text-[#868584]"}`}>
-                      {k}: {v}
+                      {k}: {v === "Passed" ? "OK" : v === "Running..." ? "Probando..." : v}
                     </span>
                   ))}
                 </div>
@@ -744,13 +834,13 @@ export function PanelView() {
             </div>
           )}
 
-          {/* ════════ TASKS ════════ */}
+          {/* ════════ TAREAS (alias legacy) ════════ */}
           {activeTab === "tareas" && (
             <div className="space-y-4">
               <WarpCard>
-                <WarpSectionLabel>Hermes Slow Lane (Autonomous Depth)</WarpSectionLabel>
+                <WarpSectionLabel>Hermes Carril Lento (Razonamiento Profundo)</WarpSectionLabel>
                 {!tasks?.running_slow?.length ? (
-                  <div className="text-xs text-[#868584] italic py-2">No active tasks in slow lane</div>
+                  <div className="text-xs text-[#868584] italic py-2">Sin tareas activas en el carril lento</div>
                 ) : (
                   <div className="space-y-2">
                     {tasks.running_slow.map((t) => (
@@ -767,9 +857,9 @@ export function PanelView() {
               </WarpCard>
 
               <WarpCard>
-                <WarpSectionLabel>Hermes Fast Lane (Quick Parallel Queries)</WarpSectionLabel>
+                <WarpSectionLabel>Hermes Carril Rápido (Consultas Paralelas)</WarpSectionLabel>
                 {!tasks?.running_fast?.length ? (
-                  <div className="text-xs text-[#868584] italic py-2">No active fast tasks</div>
+                  <div className="text-xs text-[#868584] italic py-2">Sin tareas activas en el carril rápido</div>
                 ) : (
                   <div className="space-y-2">
                     {tasks.running_fast.map((t) => (
@@ -786,16 +876,16 @@ export function PanelView() {
               </WarpCard>
 
               <WarpCard>
-                <WarpSectionLabel>Recent Execution Ledger</WarpSectionLabel>
+                <WarpSectionLabel>Registro de Ejecuciones Recientes</WarpSectionLabel>
                 {!tasks?.recent?.length ? (
-                  <div className="text-xs text-[#868584] italic py-2">Execution ledger is empty</div>
+                  <div className="text-xs text-[#868584] italic py-2">El registro de ejecuciones está vacío</div>
                 ) : (
                   <div className="space-y-1 font-mono text-xs">
                     {tasks.recent.slice(0, 15).map((t) => (
                       <div key={t.task_id} className="flex justify-between items-center py-2 px-3 hover:bg-white/[0.02] rounded-md transition border-b border-white/[0.03]">
                         <div className="flex items-center gap-3 truncate max-w-lg">
                           <span className={t.state === "completed" ? "text-emerald-400" : t.state === "failed" ? "text-red-400" : "text-[#868584]"}>
-                            ● {t.state?.toUpperCase()}
+                            ● {t.state === "completed" ? "COMPLETADO" : t.state === "failed" ? "FALLIDO" : t.state?.toUpperCase()}
                           </span>
                           <span className="text-[#afaeac] truncate">{t.prompt}</span>
                         </div>
@@ -852,21 +942,21 @@ export function PanelView() {
             />
           )}
 
-          {/* ════════ TERMINAL LOGS ════════ */}
+          {/* ════════ LOGS DEL SISTEMA ════════ */}
           {activeTab === "logs" && (
             <WarpCard className="h-[calc(100vh-100px)] flex flex-col bg-[#111113] border-white/[0.08]">
               <div className="flex justify-between items-center pb-3 mb-2 border-b border-white/[0.06]">
-                <WarpSectionLabel>Kernel Output Stream</WarpSectionLabel>
+                <WarpSectionLabel>Flujo de Salida del Kernel</WarpSectionLabel>
                 <button
                   onClick={() => useJarvisStore.getState().clearLogs()}
                   className="px-3.5 py-1 text-xs font-mono text-red-400/80 hover:text-red-300 bg-red-950/20 border border-red-500/20 rounded-full transition cursor-pointer"
                 >
-                  Clear Buffer
+                  Limpiar Buffer
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto font-mono text-xs space-y-1 pr-2 min-h-0">
                 {storeLogs.length === 0 ? (
-                  <div className="text-[#868584] italic py-4">No events logged in current session</div>
+                  <div className="text-[#868584] italic py-4">Sin eventos registrados en la sesión actual</div>
                 ) : (
                   storeLogs.map((log, idx) => (
                     <div key={idx} className="flex items-start gap-3 py-1 px-2 hover:bg-white/[0.02] rounded transition leading-relaxed">
@@ -908,62 +998,117 @@ export function PanelView() {
             </div>
           )}
 
-          {/* ════════ ACTIONS ════════ */}
+          {/* ════════ ACCIONES RÁPIDAS ════════ */}
           {activeTab === "acciones" && (
-            <div className="space-y-4">
+            <div className="space-y-5">
+              <div>
+                <h1 className="text-base font-bold text-[#faf9f6] tracking-tight">Acciones Rápidas</h1>
+                <p className="text-[11px] text-[#868584] mt-0.5">Control directo sobre el pipeline de voz y el núcleo del sistema</p>
+              </div>
+
+              {quickActionStatus && (
+                <div
+                  role="status"
+                  className={`px-4 py-3 text-xs font-mono border rounded-lg ${
+                    quickActionStatus.includes(": completado")
+                      ? "text-emerald-300 bg-emerald-950/20 border-emerald-500/25"
+                      : "text-red-300 bg-red-950/20 border-red-500/25"
+                  }`}
+                >
+                  {quickActionStatus}
+                </div>
+              )}
+
               <WarpCard>
-                <WarpSectionLabel>Voice Pipeline Controls</WarpSectionLabel>
+                <WarpSectionLabel>Control de Pipeline de Voz</WarpSectionLabel>
                 <div className="flex flex-wrap gap-3">
                   <button
-                    onClick={async () => { try { await jarvisAPI.toggleMute(); } catch {} }}
-                    className="px-5 py-2.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
+                    onClick={() => runQuickAction("Micrófono", () => jarvisAPI.toggleMute())}
+                    disabled={quickActionPending !== null}
+                    className="px-5 py-2.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    Toggle Microphone
+                    {quickActionPending === "Micrófono" ? "Procesando..." : "⏺  Alternar Micrófono"}
                   </button>
                   <button
-                    onClick={async () => { try { await jarvisAPI.restartVoice(); } catch {} }}
-                    className="px-5 py-2.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
+                    onClick={() => runQuickAction("Sesión Live", () => jarvisAPI.restartVoice())}
+                    disabled={quickActionPending !== null}
+                    className="px-5 py-2.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    Restart Live Session
+                    {quickActionPending === "Sesión Live" ? "Procesando..." : "↺  Reiniciar Sesión en Vivo"}
                   </button>
                 </div>
               </WarpCard>
 
               <WarpCard>
-                <WarpSectionLabel>Kernel State Management</WarpSectionLabel>
+                <WarpSectionLabel>Control de Estado del Núcleo</WarpSectionLabel>
                 <div className="flex flex-wrap gap-3">
                   <button
-                    onClick={async () => { try { await jarvisAPI.wake(); } catch {} }}
-                    className="px-5 py-2.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
+                    onClick={() => runQuickAction("Activación del núcleo", () => jarvisAPI.wake())}
+                    disabled={quickActionPending !== null}
+                    className="px-5 py-2.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    Wake Kernel
+                    {quickActionPending === "Activación del núcleo" ? "Procesando..." : "▶  Despertar Kernel"}
                   </button>
                   <button
-                    onClick={async () => { try { await jarvisAPI.sleep(); } catch {} }}
-                    className="px-5 py-2.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
+                    onClick={() => runQuickAction("Reposo del núcleo", () => jarvisAPI.sleep())}
+                    disabled={quickActionPending !== null}
+                    className="px-5 py-2.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    Sleep Kernel
+                    {quickActionPending === "Reposo del núcleo" ? "Procesando..." : "⏸  Poner en Reposo"}
                   </button>
                   <button
-                    onClick={async () => { try { await jarvisAPI.cancelTask(); } catch {} }}
-                    className="px-5 py-2.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
+                    onClick={() => runQuickAction("Interrupción de tarea", () => jarvisAPI.cancelTask())}
+                    disabled={quickActionPending !== null}
+                    className="px-5 py-2.5 text-xs font-medium text-amber-300/80 hover:text-amber-200 bg-amber-950/20 hover:bg-amber-900/30 border border-amber-500/20 rounded-full transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    Interrupt Active Task
+                    {quickActionPending === "Interrupción de tarea" ? "Procesando..." : "⏹  Interrumpir Tarea Activa"}
                   </button>
+                </div>
+              </WarpCard>
+
+              {/* Diagnósticos también disponibles aquí */}
+              <WarpCard>
+                <WarpSectionLabel>Diagnósticos del Pipeline</WarpSectionLabel>
+                <div className="flex flex-wrap gap-2.5 items-center">
+                  <button
+                    onClick={() => runTest("voz-en-vivo", jarvisAPI.testLive)}
+                    className="px-3.5 py-1.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
+                  >
+                    Probar Sesión en Vivo
+                  </button>
+                  <button
+                    onClick={() => runTest("hermes-lento", jarvisAPI.testHermesSlow)}
+                    className="px-3.5 py-1.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
+                  >
+                    Probar Hermes Lento
+                  </button>
+                  <button
+                    onClick={() => runTest("hermes-rapido", jarvisAPI.testHermesFast)}
+                    className="px-3.5 py-1.5 text-xs font-medium text-[#afaeac] hover:text-[#faf9f6] bg-[#222224] hover:bg-[#2d2d30] border border-white/[0.08] rounded-full transition cursor-pointer"
+                  >
+                    Probar Hermes Rápido
+                  </button>
+                  {Object.entries(testResults).map(([k, v]) => (
+                    <span key={k} className={`text-xs font-mono px-3 py-1 rounded-full border ${v === "Passed" ? "bg-emerald-950/40 border-emerald-500/30 text-emerald-300" : v.startsWith("Failed") ? "bg-red-950/40 border-red-500/30 text-red-300" : "bg-[#222224] border-white/[0.08] text-[#868584]"}`}>
+                      {k}: {v === "Passed" ? "OK" : v === "Running..." ? "Probando..." : v}
+                    </span>
+                  ))}
                 </div>
               </WarpCard>
 
               <WarpCard className="border-red-500/20 bg-red-950/10">
-                <WarpSectionLabel>Danger Zone</WarpSectionLabel>
+                <WarpSectionLabel>Zona Peligrosa</WarpSectionLabel>
+                <p className="text-[11px] text-[#868584] mb-3">Esta acción termina el proceso del kernel de JARVIS de forma irreversible.</p>
                 <button
                   onClick={async () => {
-                    if (window.confirm("Are you sure you want to terminate the JARVIS core process? This action is irreversible.")) {
-                      try { await jarvisAPI.shutdown(); } catch {}
+                    if (window.confirm("¿Estás seguro de que deseas terminar el proceso del núcleo de JARVIS? Esta acción es irreversible.")) {
+                      runQuickAction("Cierre del núcleo", () => jarvisAPI.shutdown());
                     }
                   }}
-                  className="px-5 py-2.5 text-xs font-medium text-red-300 hover:text-red-200 bg-red-950/40 hover:bg-red-900/50 border border-red-500/30 rounded-full transition cursor-pointer"
+                  disabled={quickActionPending !== null}
+                  className="px-5 py-2.5 text-xs font-medium text-red-300 hover:text-red-200 bg-red-950/40 hover:bg-red-900/50 border border-red-500/30 rounded-full transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Terminate Kernel Process
+                  ⚠ Terminar Proceso del Kernel
                 </button>
               </WarpCard>
             </div>

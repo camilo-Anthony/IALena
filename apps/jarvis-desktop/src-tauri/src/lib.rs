@@ -42,21 +42,38 @@ fn set_sidebar_open(open: bool) {
 }
 
 #[tauri::command]
-fn set_active_view_state(view: String) {
-    IS_ORB_VIEW.store(view == "orb", Ordering::Relaxed);
-}
+fn set_active_view_state(app: AppHandle, view: String) {
+    let is_orb = view == "orb";
+    IS_ORB_VIEW.store(is_orb, Ordering::Relaxed);
 
-#[tauri::command]
-fn launch_hermes_app() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use std::process::Command;
-        Command::new("cmd")
-            .args(&["/c", "start", "Hermes Desktop", "/Min", "cmd", "/c", "cd Hermes-Agent\\apps\\desktop && npm run dev"])
-            .spawn()
-            .map_err(|e| e.to_string())?;
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    if is_orb {
+        let _ = window.set_decorations(false);
+        let _ = window.set_shadow(false);
+        let _ = window.set_resizable(false);
+        let _ = window.set_always_on_top(true);
+        if let Ok(Some(monitor)) = window.current_monitor() {
+            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: 0, y: 0 }));
+            let _ = window.set_size(tauri::Size::Physical(*monitor.size()));
+        }
+    } else {
+        // El control plane no es un overlay: necesita una ventana normal,
+        // redimensionable y sin estar por encima de todas las aplicaciones.
+        SIDEBAR_OPEN.store(false, Ordering::Relaxed);
+        let _ = window.set_ignore_cursor_events(false);
+        let _ = window.set_always_on_top(false);
+        let _ = window.set_resizable(true);
+        let _ = window.set_decorations(true);
+        let _ = window.set_shadow(true);
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+            width: 1440.0,
+            height: 900.0,
+        }));
+        let _ = window.center();
     }
-    Ok(())
 }
 
 #[tauri::command]
@@ -138,8 +155,7 @@ pub fn run() {
             get_cursor_position,
             set_click_through,
             set_sidebar_open,
-            set_active_view_state,
-            launch_hermes_app
+            set_active_view_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
